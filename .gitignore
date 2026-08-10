@@ -1,0 +1,40 @@
+# --- Raw data (~2.7 GB, symlinked from the extracted Kaggle archive) -------------
+data/raw/
+# Same provenance: a symlink into the Kaggle extract, so it would be dangling on a
+# fresh clone. Task 1 recreates it; the directory itself stays via .gitkeep.
+references/*.csv
+!references/.gitkeep
+
+# Stage outputs — produced by `dvc repro`, not committed. The .gitkeep files keep the
+# directories themselves in the tree so stages have somewhere to write after a clone.
+data/interim/*
+!data/interim/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+reports/figures/*
+!reports/figures/.gitkeep
+
+# --- Model artifacts --------------------------------------------------------------
+*.pkl
+*.joblib
+models/*
+!models/.gitkeep
+
+# --- Experiment tracking / logs ---------------------------------------------------
+mlruns/
+mlartifacts/
+logs/
+
+# --- Python -----------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- OS / editor ------------------------------------------------------------------
+.DS_Store
+.vscode/
+.idea/

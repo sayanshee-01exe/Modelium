@@ -1,12 +1,16 @@
 """Training entry point.
 
-Flow: load -> validate -> clean -> aggregate -> features -> split -> train -> evaluate.
+Flow: load -> validate -> clean -> aggregate -> features -> split -> fit preprocessor
+-> baseline + tuning -> validation comparison -> champion + quality gates -> threshold
+-> final test evaluation -> serialize.
 
 Split discipline (Step 1 of the refactor plan):
 
-    TRAIN       fit the preprocessor, fit every candidate model
-    VALIDATION  compare models, select the champion, tune the decision threshold
-    TEST        scored exactly once, at the end, with the threshold already frozen
+    TRAIN       fit the preprocessor, fit the baseline, run every CV fold of the
+                randomised hyperparameter search
+    VALIDATION  compare models, select the champion, apply quality gates, tune the
+                decision threshold
+    TEST        scored exactly once, at the end, with model and threshold frozen
 
 Nothing above the "FINAL TEST EVALUATION" banner may read the test split.
 """
@@ -23,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config import (
     DATA_DIR, DATA_FILES, RANDOM_STATE, TARGET_COL, ID_COL, MODEL_DIR, ARTIFACT_DIR,
-    VALIDATION_SIZE, TEST_SIZE,
+    VALIDATION_SIZE, TEST_SIZE, TUNING_N_ITER, TUNING_CV_FOLDS,
 )
 from src.data.data_loader import load_home_credit_tables
 from src.data.data_validation import validate_raw_files, validate_raw_tables
@@ -34,7 +38,9 @@ from src.features.data_preprocessing import (
     align_to_training_schema, build_preprocessor,
     get_input_feature_names, get_output_feature_names,
 )
-from src.models.train import build_candidate_models, train_models
+from src.models.train import build_baseline_model
+from src.models.tune import summarize_tuning, tune_candidates
+from src.models.selection import select_champion
 from src.models.evaluation import evaluate_model, evaluate_at_threshold, get_probability_scores
 from src.models.threshold import find_f1_optimal_threshold
 from src.models.serialization import save_production_bundle
@@ -91,18 +97,38 @@ def main():
     X_test_t = preprocessor.transform(align_to_training_schema(X_test, training_columns))
 
     scale_pos_weight = float((y_train == 0).sum() / (y_train == 1).sum())
-    candidates = build_candidate_models(RANDOM_STATE, scale_pos_weight)
-    trained = train_models(candidates, X_train_t, y_train)
+
+    # ------------------------------------------------------- TRAIN: baseline + tuning
+    # Both the baseline fit and every CV fold of the search live inside X_train.
+    logger.info("Fitting Logistic Regression baseline...")
+    baseline = build_baseline_model(RANDOM_STATE)
+    baseline.fit(X_train_t, y_train)
+
+    logger.info("Tuning Random Forest / XGBoost / LightGBM on training CV folds...")
+    searches = tune_candidates(
+        X_train_t, y_train,
+        n_iter=TUNING_N_ITER, cv_folds=TUNING_CV_FOLDS,
+        random_state=RANDOM_STATE, scale_pos_weight=scale_pos_weight,
+    )
+
+    trained = {"Logistic Regression": baseline}
+    trained.update({name: search.best_estimator_ for name, search in searches.items()})
 
     # ---------------------------------------------------------------- VALIDATION
     # Model comparison and champion selection happen here, never on test.
     results = [evaluate_model(model, X_val_t, y_val, name) for name, model in trained.items()]
-    leaderboard = pd.DataFrame(results).sort_values("PR-AUC", ascending=False)
+    champion = select_champion(results)
+    leaderboard = champion.leaderboard
     print("\nValidation leaderboard (selection metric: PR-AUC)")
     print(leaderboard.to_string(index=False))
 
-    best_name = leaderboard.iloc[0]["Model"]
+    best_name = champion.name
     best_model = trained[best_name]
+    if not champion.promoted:
+        print(f"\nWARNING: champion {best_name} failed {len(champion.gate_failures)} quality "
+              f"gate(s) and is NOT recommended for promotion:")
+        for failure in champion.gate_failures:
+            print(f"  - {failure}")
 
     # Threshold is tuned on validation probabilities, then frozen.
     val_probs = get_probability_scores(best_model, X_val_t)
@@ -130,6 +156,9 @@ def main():
         "threshold_selected_on": "validation",
         "champion_selected_on": "validation",
         "primary_metric": "PR-AUC",
+        "promoted": champion.promoted,
+        "quality_gate_failures": list(champion.gate_failures),
+        "tuning": summarize_tuning(searches),
         "split": {
             "train_rows": int(len(X_train)),
             "validation_rows": int(len(X_val)),
@@ -155,6 +184,8 @@ def main():
     save_production_bundle(best_model, preprocessor, metadata, MODEL_DIR, ARTIFACT_DIR)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     leaderboard.to_csv(ARTIFACT_DIR / "validation_leaderboard.csv", index=False)
+    pd.DataFrame(summarize_tuning(searches)).to_csv(
+        ARTIFACT_DIR / "tuning_summary.csv", index=False)
     pd.DataFrame([test_metrics]).to_csv(ARTIFACT_DIR / "test_metrics.csv", index=False)
 
 

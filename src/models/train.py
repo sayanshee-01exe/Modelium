@@ -10,8 +10,28 @@ import lightgbm as lgb
 import xgboost as xgb
 
 
+def build_baseline_model(random_state: int = 42):
+    """Interpretable Logistic Regression baseline — deliberately not tuned.
+
+    Every tuned model is judged against this on validation. A gradient booster that
+    cannot beat a linear model on PR-AUC is not worth its complexity, and without a
+    fixed reference point that comparison is unavailable.
+    """
+    return LogisticRegression(
+        class_weight="balanced", C=.1, solver="saga", max_iter=1000,
+        random_state=random_state, n_jobs=-1,
+    )
+
+
 def build_candidate_models(random_state: int, scale_pos_weight: float = 1.0):
-    """Return the baseline model portfolio used in the original notebook."""
+    """Full experimental portfolio from the original notebook.
+
+    NOT used by the default training path. `scripts/train.py` runs
+    `build_baseline_model` plus the three tuned models from `src/models/tune.py`;
+    SVM, Decision Tree, AdaBoost and Gradient Boosting are kept here for ad-hoc
+    experiments only, because fitting them on the full feature table costs hours and
+    none has beaten the boosters.
+    """
     return OrderedDict({
         "Logistic Regression": LogisticRegression(
             class_weight="balanced", C=.1, solver="saga", max_iter=1000,

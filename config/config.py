@@ -35,3 +35,8 @@ DATA_FILES = {
     "credit_card": "credit_card_balance.csv",
     "installments": "installments_payments.csv",
 }
+
+# Step 4 randomised-search budget. n_iter x cv_folds fits per tuned model, so 20x3 = 60.
+# Kept modest so a full run stays feasible on a laptop; raise for a serious sweep.
+TUNING_N_ITER = 20
+TUNING_CV_FOLDS = 3

@@ -7,6 +7,12 @@ HIGH_MISSING_THRESHOLD = 60.0
 LOW_CARDINALITY_THRESHOLD = 10
 DOWNSAMPLE_RATIO = 0.10
 
+# Three-way split sizes, as fractions of the full dataset (Step 1).
+# Step 7 of the refactor plan moves these into params.yaml; they live here for now so
+# Step 1 does not depend on a file that does not exist yet.
+VALIDATION_SIZE = 0.15
+TEST_SIZE = 0.15
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
 ARTIFACT_DIR = PROJECT_ROOT / "artifacts"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
 
 def aggregate_numeric_table(df: pd.DataFrame, group_key: str, prefix: str) -> pd.DataFrame:
@@ -39,3 +40,77 @@ def build_relational_feature_table(tables: dict[str, pd.DataFrame]) -> pd.DataFr
     for agg_df, _ in rollups:
         app = app.merge(agg_df, on="SK_ID_CURR", how="left")
     return app
+
+
+def split_train_val_test(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    validation_size: float = 0.15,
+    test_size: float = 0.15,
+    random_state: int = 42,
+    stratify: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+    """Split into three disjoint sets so the test data never informs model selection.
+
+    The pipeline previously made a single train/test split and then used that one
+    holdout for model comparison, champion selection, threshold tuning *and* final
+    reporting — so the reported metrics were optimistically biased. The three-way
+    split gives each concern its own data:
+
+        train      fit the preprocessor and the candidate models
+        validation compare models, tune hyperparameters, pick the threshold
+        test       scored exactly once, after everything is frozen
+
+    ``validation_size`` and ``test_size`` are fractions of the **original** frame,
+    not of what remains after the test holdout.
+
+    Args:
+        X: Feature frame.
+        y: Target aligned to ``X`` by position and index.
+        validation_size: Fraction of the original rows held out for validation.
+        test_size: Fraction of the original rows held out for the final test.
+        random_state: Seed, so a rerun reproduces the same three sets.
+        stratify: Preserve the class balance in every split. TARGET is ~8% positive,
+            and an unstratified split can leave a small split with too few positives
+            for PR-AUC to mean anything.
+
+    Returns:
+        ``(X_train, X_val, X_test, y_train, y_val, y_test)``
+
+    Raises:
+        ValueError: If the inputs are empty or misaligned, if either size is outside
+            (0, 1), or if the two sizes leave no training data.
+    """
+    if len(X) != len(y):
+        raise ValueError(f"X and y length mismatch: {len(X)} vs {len(y)}")
+    if len(X) == 0:
+        raise ValueError("Cannot split an empty dataset")
+
+    for name, size in (("validation_size", validation_size), ("test_size", test_size)):
+        if not 0.0 < size < 1.0:
+            raise ValueError(f"{name} must be strictly between 0 and 1, got {size}")
+    if validation_size + test_size >= 1.0:
+        raise ValueError(
+            f"validation_size + test_size must be < 1 to leave training data, "
+            f"got {validation_size} + {test_size} = {validation_size + test_size}"
+        )
+
+    X_rest, X_test, y_rest, y_test = train_test_split(
+        X, y,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=y if stratify else None,
+    )
+
+    # validation_size is expressed against the original row count, so rescale it
+    # against what actually survived the test holdout.
+    val_fraction_of_rest = validation_size / (1.0 - test_size)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_rest, y_rest,
+        test_size=val_fraction_of_rest,
+        random_state=random_state,
+        stratify=y_rest if stratify else None,
+    )
+
+    return X_train, X_val, X_test, y_train, y_val, y_test

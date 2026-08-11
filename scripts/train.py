@@ -1,24 +1,35 @@
+"""Training entry point.
+
+Split discipline (Step 1 of the refactor plan):
+
+    TRAIN       fit the preprocessor, fit every candidate model
+    VALIDATION  compare models, select the champion, tune the decision threshold
+    TEST        scored exactly once, at the end, with the threshold already frozen
+
+Nothing above the "FINAL TEST EVALUATION" banner may read the test split.
+"""
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-import numpy as np
+
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config import (
     DATA_DIR, DATA_FILES, RANDOM_STATE, TARGET_COL, ID_COL, MODEL_DIR, ARTIFACT_DIR,
+    VALIDATION_SIZE, TEST_SIZE,
 )
 from src.data.data_loader import load_home_credit_tables
 from src.data.data_cleaning import optimize_memory, drop_low_information_columns
-from src.data.data_preparation import build_relational_feature_table
+from src.data.data_preparation import build_relational_feature_table, split_train_val_test
 from src.features.feature_engineering import add_domain_features
 from src.features.data_preprocessing import build_preprocessor
 from src.models.train import build_candidate_models, train_models
-from src.models.evaluation import evaluate_model, get_probability_scores
+from src.models.evaluation import evaluate_model, evaluate_at_threshold, get_probability_scores
 from src.models.threshold import find_f1_optimal_threshold
 from src.models.serialization import save_production_bundle
 
@@ -34,41 +45,85 @@ def main():
     X = df.drop(columns=[TARGET_COL, ID_COL], errors="ignore")
     y = df[TARGET_COL].astype(int)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=.20, stratify=y, random_state=RANDOM_STATE
+    X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(
+        X, y,
+        validation_size=VALIDATION_SIZE,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+    )
+    print(
+        f"Split — train {len(X_train):,} ({y_train.mean():.3%} positive) | "
+        f"val {len(X_val):,} ({y_val.mean():.3%}) | "
+        f"test {len(X_test):,} ({y_test.mean():.3%}) [held out]"
     )
 
+    # Fit on TRAIN only. Validation and test are transform-only, so no statistic from
+    # either can leak into the fitted imputers, encoder categories, or scaler.
     preprocessor = build_preprocessor(X_train)
     X_train_t = preprocessor.fit_transform(X_train)
+    X_val_t = preprocessor.transform(X_val)
     X_test_t = preprocessor.transform(X_test)
 
     scale_pos_weight = float((y_train == 0).sum() / (y_train == 1).sum())
     candidates = build_candidate_models(RANDOM_STATE, scale_pos_weight)
     trained = train_models(candidates, X_train_t, y_train)
 
-    results = [evaluate_model(model, X_test_t, y_test, name) for name, model in trained.items()]
+    # ---------------------------------------------------------------- VALIDATION
+    # Model comparison and champion selection happen here, never on test.
+    results = [evaluate_model(model, X_val_t, y_val, name) for name, model in trained.items()]
     leaderboard = pd.DataFrame(results).sort_values("PR-AUC", ascending=False)
+    print("\nValidation leaderboard (selection metric: PR-AUC)")
     print(leaderboard.to_string(index=False))
 
     best_name = leaderboard.iloc[0]["Model"]
     best_model = trained[best_name]
-    probs = get_probability_scores(best_model, X_test_t)
-    threshold_info = find_f1_optimal_threshold(y_test, probs)
+
+    # Threshold is tuned on validation probabilities, then frozen.
+    val_probs = get_probability_scores(best_model, X_val_t)
+    threshold_info = find_f1_optimal_threshold(y_val, val_probs)
+    frozen_threshold = float(threshold_info["threshold"])
+    print(
+        f"\nChampion: {best_name}\n"
+        f"Threshold tuned on validation: {frozen_threshold:.4f} "
+        f"(val F1={threshold_info['f1']:.4f}, "
+        f"precision={threshold_info['precision']:.4f}, "
+        f"recall={threshold_info['recall']:.4f})"
+    )
+
+    # -------------------------------------------------- FINAL TEST EVALUATION
+    # First and only read of the test split. Everything above is frozen.
+    test_probs = get_probability_scores(best_model, X_test_t)
+    test_metrics = evaluate_at_threshold(y_test, test_probs, frozen_threshold, best_name)
+    print("\nFinal test evaluation (test set touched exactly once)")
+    for key, value in test_metrics.items():
+        print(f"  {key:<10} {value:.4f}" if isinstance(value, float) else f"  {key:<10} {value}")
 
     metadata = {
         "model_name": best_name,
-        "optimal_threshold": threshold_info["threshold"],
+        "optimal_threshold": frozen_threshold,
+        "threshold_selected_on": "validation",
+        "champion_selected_on": "validation",
+        "primary_metric": "PR-AUC",
+        "split": {
+            "train_rows": int(len(X_train)),
+            "validation_rows": int(len(X_val)),
+            "test_rows": int(len(X_test)),
+            "validation_size": VALIDATION_SIZE,
+            "test_size": TEST_SIZE,
+            "random_state": RANDOM_STATE,
+            "stratified": True,
+        },
+        "validation_metrics": leaderboard.to_dict(orient="records"),
+        "test_metrics": test_metrics,
         "target": TARGET_COL,
         "id_column": ID_COL,
         "raw_feature_columns": X.columns.tolist(),
         "dropped_columns": dropped,
-        "primary_metric": "PR-AUC",
     }
     save_production_bundle(best_model, preprocessor, metadata, MODEL_DIR, ARTIFACT_DIR)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    leaderboard.to_csv(ARTIFACT_DIR / "model_leaderboard.csv", index=False)
-    print(f"\nBest model: {best_name}")
-    print(f"Optimal threshold: {threshold_info['threshold']:.4f}")
+    leaderboard.to_csv(ARTIFACT_DIR / "validation_leaderboard.csv", index=False)
+    pd.DataFrame([test_metrics]).to_csv(ARTIFACT_DIR / "test_metrics.csv", index=False)
 
 
 if __name__ == "__main__":

@@ -14,13 +14,26 @@ def build_baseline_model(random_state: int = 42):
     """Interpretable Logistic Regression baseline — deliberately not tuned.
 
     Every tuned model is judged against this on validation. A gradient booster that
-    cannot beat a linear model on PR-AUC is not worth its complexity, and without a
-    fixed reference point that comparison is unavailable.
+    cannot beat a linear model on Average Precision is not worth its complexity, and
+    without a fixed reference point that comparison is unavailable.
     """
     return LogisticRegression(
         class_weight="balanced", C=.1, solver="saga", max_iter=1000,
         random_state=random_state, n_jobs=-1,
     )
+
+
+def build_baseline_pipeline(X_train, random_state: int = 42):
+    """Baseline wrapped behind the same preprocessing contract as the tuned models.
+
+    Returns a full ``Pipeline([("preprocessor", ...), ("model", LogisticRegression)])``
+    so the baseline consumes raw frames exactly like the tuned pipelines do. Comparing a
+    baseline fitted on a pre-transformed matrix against models that preprocess
+    internally would compare two different data treatments, not two algorithms.
+    """
+    from src.models.tune import build_tuning_pipeline  # local: avoids a circular import
+
+    return build_tuning_pipeline(build_baseline_model(random_state), X_train)
 
 
 def build_candidate_models(random_state: int, scale_pos_weight: float = 1.0):

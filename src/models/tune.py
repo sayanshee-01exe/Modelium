@@ -1,17 +1,23 @@
-"""Hyperparameter tuning via randomised search over stratified CV folds.
+"""Leak-free hyperparameter tuning via randomised search over stratified CV folds.
 
-Tuning consumes the **training split only**. Cross-validation folds are carved out of
-X_train, so the validation split stays clean for model comparison and threshold tuning,
-and the test split is never seen at all — these functions have no parameter through
-which validation or test data could be passed.
+Preprocessing is part of the estimator, not something applied beforehand:
 
-Scoring is `average_precision` (PR-AUC): at a ~8% default rate, accuracy is useless and
-ROC-AUC is optimistic, because both are dominated by the majority class.
+    RandomizedSearchCV(Pipeline([("preprocessor", ...), ("model", ...)]))
 
-Only Random Forest, XGBoost and LightGBM are tuned. Logistic Regression is kept as an
-untuned interpretable baseline (see `src/models/train.py::build_baseline_model`), and
-the remaining experimental estimators in `build_candidate_models` are deliberately left
-out of the tuning path to keep a search tractable.
+so each CV fold fits its own imputer, IQR bounds, scaler and encoder categories on that
+fold's *training* portion and merely transforms its held-out portion. Fitting the
+preprocessor once on all of X_train and searching over the transformed matrix — as this
+module previously did — lets every fold's held-out rows contribute to the statistics
+used to transform them, which inflates the CV score.
+
+Because the estimator is a Pipeline, every search-space key is addressed through the
+model step (`model__n_estimators`); a bare `n_estimators` addresses nothing and sklearn
+raises.
+
+Tuning consumes the **training split only**: these functions have no parameter through
+which validation or test data could be passed. Scoring is `average_precision`, matching
+the metric `src/models/selection.py` ranks by — optimising one estimator of the PR curve
+and selecting by another would let the search winner differ from the selection winner.
 """
 
 from __future__ import annotations
@@ -24,44 +30,49 @@ import numpy as np
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.pipeline import Pipeline
 
+from src.features.data_preprocessing import build_preprocessor
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 TUNED_SUFFIX = " (Tuned)"
+PREPROCESSOR_STEP = "preprocessor"
+MODEL_STEP = "model"
 
-# Kept deliberately modest: with n_iter=20 and cv=3 this is 60 fits per model, which is
-# the practical ceiling for a laptop run on the full feature table.
+# Keys are prefixed with the pipeline step name so they resolve inside the Pipeline.
+# Budgets stay modest: n_iter x cv_folds fits per model is the practical laptop ceiling,
+# and each fit now also refits the preprocessor.
 SEARCH_SPACES: dict[str, dict[str, list[Any]]] = {
     "Random Forest": {
-        "n_estimators": [200, 300, 400, 600],
-        "max_depth": [6, 8, 10, 12, 16],
-        "min_samples_split": [2, 10, 25, 50],
-        "min_samples_leaf": [10, 25, 50, 100],
-        "max_features": ["sqrt", "log2", 0.3],
+        f"{MODEL_STEP}__n_estimators": [200, 300, 400, 600],
+        f"{MODEL_STEP}__max_depth": [6, 8, 10, 12, 16],
+        f"{MODEL_STEP}__min_samples_split": [2, 10, 25, 50],
+        f"{MODEL_STEP}__min_samples_leaf": [10, 25, 50, 100],
+        f"{MODEL_STEP}__max_features": ["sqrt", "log2", 0.3],
     },
     "XGBoost": {
-        "n_estimators": [200, 300, 500, 800],
-        "learning_rate": [0.01, 0.03, 0.05, 0.1],
-        "max_depth": [3, 4, 5, 6, 8],
-        "min_child_weight": [1, 5, 10, 25],
-        "subsample": [0.6, 0.7, 0.8, 0.9],
-        "colsample_bytree": [0.6, 0.7, 0.8, 0.9],
-        "gamma": [0.0, 0.1, 0.5, 1.0],
-        "reg_alpha": [0.0, 0.1, 1.0, 5.0],
-        "reg_lambda": [0.5, 1.0, 5.0, 10.0],
+        f"{MODEL_STEP}__n_estimators": [200, 300, 500, 800],
+        f"{MODEL_STEP}__learning_rate": [0.01, 0.03, 0.05, 0.1],
+        f"{MODEL_STEP}__max_depth": [3, 4, 5, 6, 8],
+        f"{MODEL_STEP}__min_child_weight": [1, 5, 10, 25],
+        f"{MODEL_STEP}__subsample": [0.6, 0.7, 0.8, 0.9],
+        f"{MODEL_STEP}__colsample_bytree": [0.6, 0.7, 0.8, 0.9],
+        f"{MODEL_STEP}__gamma": [0.0, 0.1, 0.5, 1.0],
+        f"{MODEL_STEP}__reg_alpha": [0.0, 0.1, 1.0, 5.0],
+        f"{MODEL_STEP}__reg_lambda": [0.5, 1.0, 5.0, 10.0],
     },
     "LightGBM": {
-        "n_estimators": [300, 500, 800, 1200],
-        "learning_rate": [0.01, 0.03, 0.05, 0.1],
-        "num_leaves": [15, 31, 63, 127],
-        "max_depth": [-1, 5, 7, 9],
-        "min_child_samples": [10, 25, 50, 100],
-        "subsample": [0.6, 0.7, 0.8, 0.9],
-        "colsample_bytree": [0.6, 0.7, 0.8, 0.9],
-        "reg_alpha": [0.0, 0.1, 1.0, 5.0],
-        "reg_lambda": [0.5, 1.0, 5.0, 10.0],
+        f"{MODEL_STEP}__n_estimators": [300, 500, 800, 1200],
+        f"{MODEL_STEP}__learning_rate": [0.01, 0.03, 0.05, 0.1],
+        f"{MODEL_STEP}__num_leaves": [15, 31, 63, 127],
+        f"{MODEL_STEP}__max_depth": [-1, 5, 7, 9],
+        f"{MODEL_STEP}__min_child_samples": [10, 25, 50, 100],
+        f"{MODEL_STEP}__subsample": [0.6, 0.7, 0.8, 0.9],
+        f"{MODEL_STEP}__colsample_bytree": [0.6, 0.7, 0.8, 0.9],
+        f"{MODEL_STEP}__reg_alpha": [0.0, 0.1, 1.0, 5.0],
+        f"{MODEL_STEP}__reg_lambda": [0.5, 1.0, 5.0, 10.0],
     },
 }
 
@@ -71,12 +82,12 @@ def build_tunable_models(random_state: int = 42, scale_pos_weight: float = 1.0) 
 
     Imbalance is handled by the estimator rather than by resampling: `class_weight` for
     the forest and LightGBM, `scale_pos_weight` for XGBoost. Resampling would have to
-    happen inside each CV fold to be leak-free, which randomised search does not do for
-    free — weighting is the correct default here.
+    happen inside each CV fold to stay leak-free, which randomised search does not do
+    for free — weighting is the correct default here.
 
     Args:
         random_state: Seed, so a rerun reproduces the same fits.
-        scale_pos_weight: Typically ``(negatives / positives)`` computed on X_train.
+        scale_pos_weight: Typically ``(negatives / positives)`` from the training split.
     """
     return {
         "Random Forest": RandomForestClassifier(
@@ -92,6 +103,24 @@ def build_tunable_models(random_state: int = 42, scale_pos_weight: float = 1.0) 
     }
 
 
+def build_tuning_pipeline(estimator, X_train, preprocessor=None) -> Pipeline:
+    """Wrap an estimator behind preprocessing so the pair is fitted as one unit.
+
+    Args:
+        estimator: Unfitted classifier.
+        X_train: Raw training frame — only its column layout and dtypes are read, to
+            decide which columns are numeric and which are categorical. No statistic is
+            learned here; that happens per fold inside the search.
+        preprocessor: Override for the transformer, primarily so tests can inject a spy.
+            Defaults to `build_preprocessor(X_train)`.
+
+    Returns:
+        ``Pipeline([("preprocessor", ...), ("model", estimator)])``.
+    """
+    transformer = build_preprocessor(X_train) if preprocessor is None else preprocessor
+    return Pipeline([(PREPROCESSOR_STEP, transformer), (MODEL_STEP, estimator)])
+
+
 def tune_model(
     estimator,
     param_distributions: dict[str, list[Any]],
@@ -104,31 +133,34 @@ def tune_model(
     random_state: int = 42,
     n_jobs: int = -1,
     verbose: int = 0,
+    preprocessor=None,
 ) -> RandomizedSearchCV:
-    """Randomised search over `param_distributions`, scored by stratified CV.
+    """Randomised search over a preprocessing+model Pipeline, scored by stratified CV.
 
     Stratified folds matter at a ~8% positive rate: a plain KFold can hand a fold zero
     positives, which makes average_precision undefined for that split.
 
     Args:
-        estimator: Unfitted estimator.
-        param_distributions: Search space; see `SEARCH_SPACES`.
-        X_train: Training features — *only* the training split.
+        estimator: Unfitted classifier; wrapped in a Pipeline internally.
+        param_distributions: Search space with `model__`-prefixed keys; see `SEARCH_SPACES`.
+        X_train: **Raw** training features — untransformed, *only* the training split.
         y_train: Training labels.
         n_iter: Parameter settings sampled. 15-30 is the practical range.
         cv_folds: Stratified folds per candidate.
-        scoring: Optimisation metric. PR-AUC by default.
+        scoring: Optimisation metric. Average Precision by default.
         random_state: Seed for both the sampler and the fold split.
         n_jobs: Parallel workers.
         verbose: Passed through to the search.
+        preprocessor: Optional transformer override; see `build_tuning_pipeline`.
 
     Returns:
-        The fitted `RandomizedSearchCV`, exposing `best_estimator_`, `best_params_`
-        and `best_score_`.
+        The fitted `RandomizedSearchCV`. Its `best_estimator_` is a **full Pipeline**
+        that accepts raw frames, so inference needs no separate preprocessing step.
     """
+    pipeline = build_tuning_pipeline(estimator, X_train, preprocessor=preprocessor)
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     search = RandomizedSearchCV(
-        estimator=estimator,
+        estimator=pipeline,
         param_distributions=param_distributions,
         n_iter=n_iter,
         scoring=scoring,
@@ -160,11 +192,12 @@ def tune_candidates(
     random_state: int = 42,
     scale_pos_weight: float = 1.0,
     n_jobs: int = -1,
+    preprocessor=None,
 ) -> dict[str, RandomizedSearchCV]:
-    """Tune each requested model on the training split.
+    """Tune each requested model on the raw training split.
 
     Args:
-        X_train: Training features only.
+        X_train: **Raw** training features only.
         y_train: Training labels.
         models: Subset of `SEARCH_SPACES` keys; all three by default.
         n_iter: Parameter settings sampled per model.
@@ -173,9 +206,11 @@ def tune_candidates(
         random_state: Seed.
         scale_pos_weight: Imbalance ratio from the training split.
         n_jobs: Parallel workers.
+        preprocessor: Optional transformer override, mainly for tests.
 
     Returns:
-        ``{"<name> (Tuned)": fitted RandomizedSearchCV}``.
+        ``{"<name> (Tuned)": fitted RandomizedSearchCV}``, each `best_estimator_` a
+        full preprocessing+model Pipeline.
 
     Raises:
         ValueError: if `models` names an estimator with no search space.
@@ -191,11 +226,12 @@ def tune_candidates(
                                        scale_pos_weight=scale_pos_weight)
     results: dict[str, RandomizedSearchCV] = {}
     for name in requested:
-        logger.info("Tuning %s (%d candidates x %d folds)...", name, n_iter, cv_folds)
+        logger.info("Tuning %s (%d candidates x %d folds, preprocessing refit per fold)...",
+                    name, n_iter, cv_folds)
         results[f"{name}{TUNED_SUFFIX}"] = tune_model(
             base_models[name], SEARCH_SPACES[name], X_train, y_train,
             n_iter=n_iter, cv_folds=cv_folds, scoring=scoring,
-            random_state=random_state, n_jobs=n_jobs,
+            random_state=random_state, n_jobs=n_jobs, preprocessor=preprocessor,
         )
     return results
 

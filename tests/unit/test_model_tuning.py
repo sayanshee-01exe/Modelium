@@ -1,11 +1,13 @@
-"""Step 4 — hyperparameter tuning.
+"""Step 4 — hyperparameter tuning with leak-free cross-validation.
 
-The contract these pin: tuning happens with cross-validation *inside the training
-split*, optimising average_precision, and the tuning functions cannot see validation or
-test data even by accident — their signatures have nowhere to put it.
+The contract these pin: preprocessing lives *inside* the estimator handed to the search,
+so every CV fold fits its own imputer/clipper/scaler/encoder on that fold's training
+portion only. Fitting the preprocessor once on all of X_train and passing the transformed
+matrix into the search — the previous implementation — let each fold's held-out rows
+contribute to the statistics used to transform them, inflating CV scores.
 
-Searches here run with tiny n_iter/cv on synthetic data; the real search spaces are
-exercised for shape, not for predictive quality.
+`test_preprocessing_is_refitted_per_cv_fold` is the test that actually proves it: a
+counting transformer shows folds+1 fits (one per fold, plus the final refit), not 1.
 """
 
 from __future__ import annotations
@@ -15,8 +17,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,32 +29,60 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models.tune import (
+    MODEL_STEP,
+    PREPROCESSOR_STEP,
     SEARCH_SPACES,
     TUNED_SUFFIX,
     build_tunable_models,
+    build_tuning_pipeline,
     tune_candidates,
     tune_model,
 )
 
 
 @pytest.fixture
-def imbalanced_xy():
-    """~15% positive, with real signal so a tree can actually fit something."""
+def raw_xy() -> tuple[pd.DataFrame, pd.Series]:
+    """Raw, untransformed frame — with NaNs and a categorical, as tuning now receives."""
     rng = np.random.default_rng(0)
     n = 300
     signal = rng.normal(size=n)
-    X = np.column_stack([signal, rng.normal(size=n), rng.normal(size=n)])
-    y = (rng.random(n) < 1 / (1 + np.exp(-(signal * 2 - 2)))).astype(int)
-    if y.sum() < 10:                       # guarantee both classes are well represented
-        y[:15] = 1
+    X = pd.DataFrame({
+        "num_a": signal,
+        "num_b": rng.normal(size=n),
+        "cat_a": rng.choice(["x", "y", "z"], size=n),
+    })
+    X.loc[X.sample(frac=0.1, random_state=1).index, "num_b"] = np.nan
+    y = pd.Series((rng.random(n) < 1 / (1 + np.exp(-(signal * 2 - 1.5)))).astype(int))
+    if y.sum() < 20:
+        y.iloc[:25] = 1
     return X, y
 
 
-# ------------------------------------------------------------------- search spaces
+class _CountingPreprocessor(BaseEstimator, TransformerMixin):
+    """Passthrough that records how many times `fit` was called across all instances."""
+
+    fit_calls = 0
+
+    def fit(self, X, y=None):
+        type(self).fit_calls += 1
+        self.n_features_in_ = np.asarray(X).shape[1]
+        return self
+
+    def transform(self, X):
+        return np.asarray(X, dtype=float)
+
+
+# --------------------------------------------------------------- search-space shape
 
 def test_only_the_three_intended_models_are_tunable() -> None:
-    """LogReg stays an untuned baseline; SVM/DT/AdaBoost/GBM stay out of the hot path."""
     assert set(SEARCH_SPACES) == {"Random Forest", "XGBoost", "LightGBM"}
+
+
+@pytest.mark.parametrize("name", ["Random Forest", "XGBoost", "LightGBM"])
+def test_every_search_space_key_uses_the_model_prefix(name) -> None:
+    """Inside a Pipeline, a bare `n_estimators` addresses nothing and sklearn raises."""
+    unprefixed = [k for k in SEARCH_SPACES[name] if not k.startswith(f"{MODEL_STEP}__")]
+    assert unprefixed == [], f"{name} has unprefixed keys: {unprefixed}"
 
 
 @pytest.mark.parametrize("params", [
@@ -63,70 +96,124 @@ def test_only_the_three_intended_models_are_tunable() -> None:
 ])
 def test_search_space_covers_required_parameters(params) -> None:
     name, required = params
-    assert required <= set(SEARCH_SPACES[name]), f"{name} missing {required - set(SEARCH_SPACES[name])}"
+    present = {k.split("__", 1)[1] for k in SEARCH_SPACES[name]}
+    assert required <= present, f"{name} missing {required - present}"
 
 
 def test_tunable_models_are_built_unfitted() -> None:
     models = build_tunable_models(random_state=42, scale_pos_weight=3.0)
     assert set(models) == {"Random Forest", "XGBoost", "LightGBM"}
-    for name, model in models.items():
+    for model in models.values():
         with pytest.raises(Exception):
             check_is_fitted(model)
 
 
 def test_imbalance_handling_is_configured() -> None:
-    """scale_pos_weight for the boosters, class_weight for the forest."""
     models = build_tunable_models(random_state=42, scale_pos_weight=11.5)
     assert models["XGBoost"].get_params()["scale_pos_weight"] == 11.5
     assert models["LightGBM"].get_params()["class_weight"] == "balanced"
     assert models["Random Forest"].get_params()["class_weight"] == "balanced"
 
 
-# --------------------------------------------------------------------- tune_model
+# ------------------------------------------------------------------ pipeline shape
 
-def test_tuning_returns_a_fitted_best_estimator(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
-    models = build_tunable_models(42, 2.0)
-    search = tune_model(models["Random Forest"], SEARCH_SPACES["Random Forest"], X, y,
+def test_build_tuning_pipeline_wraps_preprocessing_and_model(raw_xy) -> None:
+    X, _ = raw_xy
+    pipe = build_tuning_pipeline(build_tunable_models(42)["Random Forest"], X)
+    assert isinstance(pipe, Pipeline)
+    assert list(pipe.named_steps) == [PREPROCESSOR_STEP, MODEL_STEP]
+
+
+def test_search_estimator_is_a_pipeline_containing_preprocessing(raw_xy) -> None:
+    """RandomizedSearchCV must clone a Pipeline, not a bare estimator."""
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
+                        n_iter=2, cv_folds=2, random_state=42)
+    assert isinstance(search.estimator, Pipeline)
+    assert PREPROCESSOR_STEP in search.estimator.named_steps
+    assert isinstance(search.best_estimator_, Pipeline)
+    assert PREPROCESSOR_STEP in search.best_estimator_.named_steps
+
+
+def test_tuner_accepts_raw_dataframes(raw_xy) -> None:
+    """Raw frame in — NaNs and a categorical column included, no pre-transform."""
+    X, y = raw_xy
+    assert X.isna().any().any() and X["cat_a"].dtype == object
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
                         n_iter=2, cv_folds=2, random_state=42)
     check_is_fitted(search.best_estimator_)
     assert search.best_estimator_.predict(X).shape == (len(y),)
 
 
-def test_tuning_uses_stratified_kfold(imbalanced_xy) -> None:
-    """Plain KFold can hand a fold zero positives, making average_precision undefined."""
-    X, y = imbalanced_xy
-    models = build_tunable_models(42, 2.0)
-    search = tune_model(models["Random Forest"], SEARCH_SPACES["Random Forest"], X, y,
+def test_fitted_pipeline_predicts_from_raw_dataframes(raw_xy) -> None:
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["LightGBM"], SEARCH_SPACES["LightGBM"],
+                        X, y, n_iter=2, cv_folds=2, random_state=42)
+    proba = search.best_estimator_.predict_proba(X)[:, 1]
+    assert proba.shape == (len(y),) and np.isfinite(proba).all()
+
+
+# ------------------------------------------------- the leak fix, proved by counting
+
+def test_preprocessing_is_refitted_per_cv_fold(raw_xy) -> None:
+    """folds + 1 fits: one per CV fold, plus the final refit on all of X_train.
+
+    A single fit would mean preprocessing statistics were shared across folds — the
+    leak this change exists to remove.
+
+    n_jobs=1 is required for the assertion, not for correctness: with parallel workers
+    the fold fits happen in child processes and their counter increments never reach
+    the parent, so the count would read 1 (the in-process refit) regardless.
+    """
+    X, y = raw_xy
+    _CountingPreprocessor.fit_calls = 0
+    tune_model(
+        build_tunable_models(42)["Random Forest"],
+        {f"{MODEL_STEP}__n_estimators": [10]},
+        X.select_dtypes(include=np.number).fillna(0.0), y,
+        n_iter=1, cv_folds=3, random_state=42, n_jobs=1,
+        preprocessor=_CountingPreprocessor(),
+    )
+    assert _CountingPreprocessor.fit_calls == 4, (
+        f"expected 3 fold fits + 1 refit, got {_CountingPreprocessor.fit_calls}"
+    )
+
+
+# ------------------------------------------------------------------ search settings
+
+def test_tuning_uses_stratified_kfold(raw_xy) -> None:
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
                         n_iter=2, cv_folds=3, random_state=42)
     assert isinstance(search.cv, StratifiedKFold)
     assert search.cv.get_n_splits() == 3
 
 
-def test_scoring_is_average_precision(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
-    models = build_tunable_models(42, 2.0)
-    search = tune_model(models["Random Forest"], SEARCH_SPACES["Random Forest"], X, y,
+def test_scoring_is_average_precision(raw_xy) -> None:
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
                         n_iter=2, cv_folds=2, random_state=42)
     assert search.scoring == "average_precision"
 
 
-def test_tuning_uses_randomized_not_grid_search(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
-    models = build_tunable_models(42, 2.0)
-    search = tune_model(models["Random Forest"], SEARCH_SPACES["Random Forest"], X, y,
+def test_tuning_uses_randomized_not_grid_search(raw_xy) -> None:
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
                         n_iter=2, cv_folds=2, random_state=42)
     assert isinstance(search, RandomizedSearchCV)
 
 
-def test_tuning_is_deterministic_for_a_fixed_seed(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
-    models = build_tunable_models(42, 2.0)
-    a = tune_model(models["Random Forest"], SEARCH_SPACES["Random Forest"], X, y,
-                   n_iter=3, cv_folds=2, random_state=7)
-    b = tune_model(build_tunable_models(42, 2.0)["Random Forest"],
-                   SEARCH_SPACES["Random Forest"], X, y,
-                   n_iter=3, cv_folds=2, random_state=7)
+def test_tuning_is_deterministic_for_a_fixed_seed(raw_xy) -> None:
+    X, y = raw_xy
+    a = tune_model(build_tunable_models(42)["Random Forest"], SEARCH_SPACES["Random Forest"],
+                   X, y, n_iter=3, cv_folds=2, random_state=7)
+    b = tune_model(build_tunable_models(42)["Random Forest"], SEARCH_SPACES["Random Forest"],
+                   X, y, n_iter=3, cv_folds=2, random_state=7)
     assert a.best_params_ == b.best_params_
 
 
@@ -134,7 +221,7 @@ def test_tuning_is_deterministic_for_a_fixed_seed(imbalanced_xy) -> None:
 
 @pytest.mark.parametrize("func", [tune_model, tune_candidates])
 def test_tuning_functions_cannot_receive_test_data(func) -> None:
-    """Leakage prevention by construction: there is no parameter to pass test data in."""
+    """Leakage prevented by construction: no parameter exists to pass test data in."""
     params = set(inspect.signature(func).parameters)
     forbidden = {"X_test", "y_test", "X_val", "y_val", "X_eval", "y_eval"}
     assert not (params & forbidden), f"{func.__name__} exposes {params & forbidden}"
@@ -142,23 +229,24 @@ def test_tuning_functions_cannot_receive_test_data(func) -> None:
 
 # ----------------------------------------------------------------- tune_candidates
 
-def test_tune_candidates_tunes_all_three(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
+def test_tune_candidates_tunes_all_three(raw_xy) -> None:
+    X, y = raw_xy
     tuned = tune_candidates(X, y, n_iter=2, cv_folds=2, random_state=42, scale_pos_weight=2.0)
     assert set(tuned) == {f"Random Forest{TUNED_SUFFIX}",
                           f"XGBoost{TUNED_SUFFIX}",
                           f"LightGBM{TUNED_SUFFIX}"}
     for search in tuned.values():
+        assert isinstance(search.best_estimator_, Pipeline)
         check_is_fitted(search.best_estimator_)
 
 
-def test_tune_candidates_can_tune_a_subset(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
+def test_tune_candidates_can_tune_a_subset(raw_xy) -> None:
+    X, y = raw_xy
     tuned = tune_candidates(X, y, models=["LightGBM"], n_iter=2, cv_folds=2, random_state=42)
     assert set(tuned) == {f"LightGBM{TUNED_SUFFIX}"}
 
 
-def test_tune_candidates_rejects_unknown_model(imbalanced_xy) -> None:
-    X, y = imbalanced_xy
+def test_tune_candidates_rejects_unknown_model(raw_xy) -> None:
+    X, y = raw_xy
     with pytest.raises(ValueError, match="Unknown"):
         tune_candidates(X, y, models=["Nonexistent"], n_iter=2, cv_folds=2)

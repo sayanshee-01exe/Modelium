@@ -1,5 +1,7 @@
 """Training entry point.
 
+Flow: load -> validate -> clean -> aggregate -> features -> split -> train -> evaluate.
+
 Split discipline (Step 1 of the refactor plan):
 
     TRAIN       fit the preprocessor, fit every candidate model
@@ -24,6 +26,7 @@ from config.config import (
     VALIDATION_SIZE, TEST_SIZE,
 )
 from src.data.data_loader import load_home_credit_tables
+from src.data.data_validation import validate_raw_files, validate_raw_tables
 from src.data.data_cleaning import optimize_memory, drop_low_information_columns
 from src.data.data_preparation import build_relational_feature_table, split_train_val_test
 from src.features.feature_engineering import add_domain_features
@@ -35,7 +38,12 @@ from src.models.serialization import save_production_bundle
 
 
 def main():
+    # load -> validate -> clean -> aggregate. Files are checked before any read, so a
+    # missing table fails in milliseconds rather than after ~7 GB of I/O.
+    validate_raw_files(DATA_DIR, DATA_FILES)
     tables = load_home_credit_tables(DATA_DIR, DATA_FILES)
+    validate_raw_tables(tables, target_col=TARGET_COL)
+
     tables = {name: optimize_memory(df) for name, df in tables.items()}
 
     df = build_relational_feature_table(tables)

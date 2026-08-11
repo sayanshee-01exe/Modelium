@@ -35,15 +35,24 @@ from src.models.train import build_candidate_models, train_models
 from src.models.evaluation import evaluate_model, evaluate_at_threshold, get_probability_scores
 from src.models.threshold import find_f1_optimal_threshold
 from src.models.serialization import save_production_bundle
+from src.utils.logger import get_logger
+
+logger = get_logger("modelium.train")
 
 
 def main():
     # load -> validate -> clean -> aggregate. Files are checked before any read, so a
-    # missing table fails in milliseconds rather than after ~7 GB of I/O.
+    # missing table fails in milliseconds rather than after ~7 GB of I/O, and table
+    # contracts are checked before anything transforms or aggregates the data.
+    logger.info("Validating raw dataset files...")
     validate_raw_files(DATA_DIR, DATA_FILES)
+
     tables = load_home_credit_tables(DATA_DIR, DATA_FILES)
+
+    logger.info("Validating loaded dataframes...")
     validate_raw_tables(tables, target_col=TARGET_COL)
 
+    logger.info("Starting memory optimization...")
     tables = {name: optimize_memory(df) for name, df in tables.items()}
 
     df = build_relational_feature_table(tables)

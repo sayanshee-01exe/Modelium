@@ -195,6 +195,35 @@ def test_duplicate_ids_allowed_in_child_tables(valid_tables) -> None:
     validate_raw_tables(valid_tables)
 
 
+def test_application_test_duplicate_sk_id_curr_fails(valid_tables) -> None:
+    """application_test is also one-row-per-applicant, so scoring cannot double-count."""
+    valid_tables["application_test"]["SK_ID_CURR"] = [5, 5]
+    with pytest.raises(DataValidationError) as exc:
+        validate_raw_tables(valid_tables)
+    assert "duplicate" in str(exc.value).lower()
+    assert "application_test" in str(exc.value)
+
+
+def test_application_test_null_sk_id_curr_fails(valid_tables) -> None:
+    valid_tables["application_test"]["SK_ID_CURR"] = [5, None]
+    with pytest.raises(DataValidationError) as exc:
+        validate_raw_tables(valid_tables)
+    assert "application_test" in str(exc.value)
+
+
+def test_application_test_does_not_require_target(valid_tables) -> None:
+    """The holdout applicants are unlabelled; requiring TARGET would reject valid data."""
+    assert "TARGET" not in REQUIRED_COLUMNS["application_test"]
+    assert "TARGET" not in valid_tables["application_test"].columns
+    validate_raw_tables(valid_tables)
+
+
+def test_application_test_may_be_absent(valid_tables) -> None:
+    """The training path never consumes it, so its absence must not block training."""
+    del valid_tables["application_test"]
+    validate_raw_tables(valid_tables)
+
+
 def test_validate_identifiers_direct(valid_tables) -> None:
     df = valid_tables["bureau"].copy()
     df.loc[0, "SK_ID_CURR"] = None

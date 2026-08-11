@@ -3,7 +3,7 @@
 The saved object is the fitted ``Pipeline([("preprocessor", ...), ("model", ...)])``,
 not the bare estimator, so a consumer can do::
 
-    champion = joblib.load("models/champion_pipeline.pkl")
+    champion = joblib.load("models/champion_pipeline.joblib")
     champion.predict_proba(raw_dataframe)
 
 Saving only the estimator would force every consumer to rebuild imputation, IQR
@@ -28,7 +28,11 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-CHAMPION_PIPELINE_FILENAME = "champion_pipeline.pkl"
+# .joblib, not .pkl: the artifact is written by joblib.dump, and the extension should say
+# which loader reads it. Both are pickle underneath, but a consumer that sees .pkl
+# reasonably reaches for pickle.load, which cannot restore the NumPy buffers joblib
+# writes out of band.
+CHAMPION_PIPELINE_FILENAME = "champion_pipeline.joblib"
 METADATA_FILENAME = "deployment_meta.json"
 PREPROCESSOR_STEP = "preprocessor"
 

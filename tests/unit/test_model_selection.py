@@ -202,3 +202,88 @@ def test_leaderboard_does_not_mutate_input_results(results) -> None:
 
 def test_selection_works_with_baseline_only(results) -> None:
     assert select_champion([results[0]]).name == "Logistic Regression"
+
+
+def test_recall_does_not_influence_champion_selection() -> None:
+    """§9: the AP leader wins even with the *worst* recall in the field.
+
+    Recall before threshold tuning is recall at 0.5, a cut-off the pipeline will never
+    ship. Letting it sway selection is precisely the ordering bug this step removes.
+    """
+    champion = select_champion([
+        _metrics("weak-AP high-recall", ap=0.11, roc_auc=0.80, recall=0.95),
+        _metrics("strong-AP low-recall", ap=0.29, roc_auc=0.79, recall=0.03),
+    ])
+    assert champion.name == "strong-AP low-recall"
+
+
+# ------------------------------------------- §9/§10/§12: the real end-to-end ordering
+
+def test_threshold_dependent_checks_run_only_after_threshold_tuning(tmp_path) -> None:
+    """Walk the actual Step 4 sequence on synthetic data, with the real modules.
+
+    The unit tests above pin each stage in isolation; this one pins the *order* they
+    compose in — champion chosen on threshold-independent metrics, threshold then tuned
+    on validation alone, and only then Recall/Precision/F1 judged at that threshold.
+    """
+    import joblib
+    from sklearn.pipeline import Pipeline
+
+    from src.models.evaluation import evaluate_at_threshold, evaluate_model
+    from src.models.serialization import CHAMPION_PIPELINE_FILENAME, save_champion_pipeline
+    from src.models.threshold import find_f1_optimal_threshold
+    from src.models.train import build_baseline_pipeline
+    from src.models.tune import MODEL_STEP, PREPROCESSOR_STEP
+
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+
+    def make(n):
+        signal = rng.normal(size=n)
+        X = pd.DataFrame({"num_a": signal,
+                          "num_b": rng.normal(size=n),
+                          "cat_a": rng.choice(["x", "y"], size=n)})
+        X.loc[X.sample(frac=0.1, random_state=1).index, "num_b"] = np.nan
+        y = pd.Series((rng.random(n) < 1 / (1 + np.exp(-(2 * signal - 1)))).astype(int))
+        return X, y
+
+    X_train, y_train = make(400)
+    X_val, y_val = make(200)
+    X_test, y_test = make(200)
+
+    # TRAIN — raw frames straight into the pipeline; no preprocessing fitted outside it.
+    model = build_baseline_pipeline(X_train, random_state=42)
+    model.fit(X_train, y_train)
+
+    # VALIDATION — champion chosen on threshold-independent metrics only.
+    champion = select_champion([evaluate_model(model, X_val, y_val, "Logistic Regression")])
+    assert set(DEFAULT_QUALITY_GATES) & THRESHOLD_DEPENDENT_METRICS == set()
+
+    # THRESHOLD — tuned on validation probabilities, never on test.
+    val_probs = model.predict_proba(X_val)[:, 1]
+    frozen = float(find_f1_optimal_threshold(y_val, val_probs)["threshold"])
+
+    # POST-THRESHOLD — only now are Recall/Precision/F1 meaningful.
+    at_threshold = evaluate_at_threshold(y_val, val_probs, frozen, champion.name)
+    assert at_threshold["Threshold"] == pytest.approx(frozen)
+    check_operational_gates(at_threshold)
+
+    # The tuned threshold is a real choice, not the 0.5 default carried through.
+    default_metrics = evaluate_at_threshold(y_val, val_probs, 0.5, champion.name)
+    assert at_threshold["F1"] >= default_metrics["F1"]
+
+    # TEST — read once, with model and threshold already frozen.
+    test_metrics = evaluate_at_threshold(
+        y_test, model.predict_proba(X_test)[:, 1], frozen, champion.name)
+    assert test_metrics["Threshold"] == pytest.approx(frozen)
+    assert PRIMARY_METRIC in test_metrics
+
+    # SERIALIZE — the artifact carries preprocessing with it and scores raw frames.
+    save_champion_pipeline(model, {"model_name": champion.name, "optimal_threshold": frozen},
+                           tmp_path / "models", tmp_path / "artifacts")
+    reloaded = joblib.load(tmp_path / "models" / CHAMPION_PIPELINE_FILENAME)
+    assert isinstance(reloaded, Pipeline)
+    assert list(reloaded.named_steps) == [PREPROCESSOR_STEP, MODEL_STEP]
+    np.testing.assert_allclose(reloaded.predict_proba(X_test)[:, 1],
+                               model.predict_proba(X_test)[:, 1])

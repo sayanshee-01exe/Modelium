@@ -136,6 +136,33 @@ def test_search_estimator_is_a_pipeline_containing_preprocessing(raw_xy) -> None
     assert PREPROCESSOR_STEP in search.best_estimator_.named_steps
 
 
+def test_pipeline_handed_to_the_search_is_unfitted(raw_xy) -> None:
+    """`build_tuning_pipeline` reads column layout only — it learns no statistic.
+
+    The complement of `test_preprocessing_is_refitted_per_cv_fold`: that one proves
+    preprocessing is fitted *inside* every fold, this one proves it was not already
+    fitted *before* the search ever saw the data.
+    """
+    X, _ = raw_xy
+    pipe = build_tuning_pipeline(build_tunable_models(42)["Random Forest"], X)
+    with pytest.raises(Exception):
+        check_is_fitted(pipe.named_steps[PREPROCESSOR_STEP])
+
+
+def test_search_never_fits_the_template_estimator(raw_xy) -> None:
+    """The search clones its estimator per candidate; the template stays untouched.
+
+    If the template's preprocessor came back fitted, something had fitted it on all of
+    X_train rather than per fold — the leak this module exists to prevent.
+    """
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
+                        n_iter=2, cv_folds=2, random_state=42)
+    with pytest.raises(Exception):
+        check_is_fitted(search.estimator.named_steps[PREPROCESSOR_STEP])
+
+
 def test_tuner_accepts_raw_dataframes(raw_xy) -> None:
     """Raw frame in — NaNs and a categorical column included, no pre-transform."""
     X, y = raw_xy
@@ -145,6 +172,27 @@ def test_tuner_accepts_raw_dataframes(raw_xy) -> None:
                         n_iter=2, cv_folds=2, random_state=42)
     check_is_fitted(search.best_estimator_)
     assert search.best_estimator_.predict(X).shape == (len(y),)
+
+
+@pytest.mark.parametrize("name", ["Random Forest", "XGBoost", "LightGBM"])
+def test_each_model_tunes_into_a_fitted_pipeline(name, raw_xy) -> None:
+    """Every tunable model must survive the raw-frame contract on its own.
+
+    Covered per model rather than only in aggregate: the three estimators come from
+    three libraries with different input handling, so one of them silently failing to
+    accept the preprocessor's output is a real failure mode.
+    """
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42, scale_pos_weight=2.0)[name],
+                        SEARCH_SPACES[name], X, y,
+                        n_iter=2, cv_folds=2, random_state=42)
+    best = search.best_estimator_
+    assert isinstance(best, Pipeline)
+    assert list(best.named_steps) == [PREPROCESSOR_STEP, MODEL_STEP]
+    check_is_fitted(best)
+    check_is_fitted(best.named_steps[PREPROCESSOR_STEP])
+    proba = best.predict_proba(X)[:, 1]
+    assert proba.shape == (len(y),) and np.isfinite(proba).all()
 
 
 def test_fitted_pipeline_predicts_from_raw_dataframes(raw_xy) -> None:

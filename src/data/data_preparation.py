@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from src.utils.exceptions import DataValidationError
+
 
 def aggregate_numeric_table(df: pd.DataFrame, group_key: str, prefix: str) -> pd.DataFrame:
     """Aggregate a one-to-many relational table to one row per group key."""
@@ -19,9 +21,38 @@ def aggregate_numeric_table(df: pd.DataFrame, group_key: str, prefix: str) -> pd
     return out.reset_index()
 
 
-def build_relational_feature_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Create one applicant-level table from the 7 Home Credit relations."""
-    app = tables["application_train"].copy()
+def build_relational_feature_table(
+    tables: dict[str, pd.DataFrame],
+    application_table: str = "application_train",
+) -> pd.DataFrame:
+    """Create one applicant-level table from the Home Credit relations.
+
+    The applicant table is a parameter so training and inference share **one**
+    implementation: ``application_train`` carries TARGET, ``application_test`` does not,
+    but the aggregation and joins are identical either way. A second copy of this
+    function for inference is how training/serving skew starts — the two drift, and the
+    model is then scored on features it was never trained on.
+
+    Nothing here reads TARGET, so the label is not required. It is simply carried
+    through as a column when the applicant table happens to have one.
+
+    Args:
+        tables: Logical table name -> DataFrame, as returned by `load_home_credit_tables`.
+        application_table: Key of the applicant-level table to build features for.
+
+    Returns:
+        One row per applicant, with the child tables aggregated and left-joined on.
+
+    Raises:
+        DataValidationError: if `application_table` is absent from `tables`.
+    """
+    if application_table not in tables:
+        raise DataValidationError(
+            f"Applicant table '{application_table}' is not among the loaded tables "
+            f"({sorted(tables)}); cannot build the relational feature table"
+        )
+
+    app = tables[application_table].copy()
     bureau = tables["bureau"]
     bb = tables["bureau_balance"]
 

@@ -55,6 +55,16 @@ UNIQUE_IDENTIFIERS: dict[str, str] = {
 
 VALID_TARGET_VALUES = {0, 1}
 
+# Tables batch inference needs. Same relational children as training — the aggregation
+# is identical — but the applicant table is application_test and TARGET is absent by
+# design, so `validate_raw_tables` (which demands application_train and a label) is the
+# wrong contract here. application_train is deliberately excluded: scoring must not need
+# the training applicants, and loading them would cost a 158 MB read for nothing.
+INFERENCE_TABLES: tuple[str, ...] = (
+    "application_test", "bureau", "bureau_balance", "previous_application",
+    "pos_cash", "credit_card", "installments",
+)
+
 
 def validate_raw_files(data_dir: str | Path, file_map: dict[str, str]) -> None:
     """Check every expected CSV exists before anything tries to read one.
@@ -141,6 +151,71 @@ def validate_identifiers(df: pd.DataFrame, name: str,
                 f"Table '{name}': identifier '{unique_col}' has {duplicate_count} duplicate "
                 f"value(s); this table must be one row per key or the joins fan out"
             )
+
+
+def validate_inference_tables(
+    tables: dict[str, pd.DataFrame],
+    *,
+    application_table: str = "application_test",
+) -> dict[str, dict]:
+    """Validate the tables batch inference will score, and report all failures at once.
+
+    Deliberately *not* `validate_raw_tables`: that one requires application_train and a
+    complete, two-class TARGET, none of which exist at scoring time. Asking inference to
+    satisfy the training contract would either fail on every run or force a fake label
+    column into the input.
+
+    The per-table checks themselves are reused rather than reimplemented, so the join
+    keys, required columns and uniqueness rules cannot drift between the two contracts.
+
+    Checks: every required table present and non-empty, required columns and join keys
+    present, no null identifiers, and one row per applicant in `application_table`
+    (a duplicate there fans the joins out and silently multiplies predictions).
+
+    Args:
+        tables: Logical table name -> DataFrame.
+        application_table: Applicant-level table to score.
+
+    Returns:
+        Per-table ``{"rows": int, "columns": int}``.
+
+    Raises:
+        DataValidationError: with every problem found, one per line.
+    """
+    problems: list[str] = []
+    report: dict[str, dict] = {}
+
+    required = set(INFERENCE_TABLES) | {application_table}
+    for name in sorted(required):
+        if name not in tables:
+            problems.append(f"Table '{name}' is required for inference but was not loaded")
+
+    for name in sorted(required & set(tables)):
+        df = tables[name]
+        report[name] = {"rows": int(len(df)), "columns": int(df.shape[1])}
+        for check in (
+            lambda: validate_not_empty(df, name),
+            lambda: validate_schema(df, name),
+            lambda: validate_identifiers(df, name),
+        ):
+            try:
+                check()
+            except DataValidationError as err:
+                problems.append(str(err))
+
+    # No validate_target call anywhere in this function: TARGET is training-only.
+    if problems:
+        raise DataValidationError(
+            f"Inference data validation failed with {len(problems)} problem(s):\n  "
+            + "\n  ".join(problems)
+        )
+
+    logger.info(
+        "Inference validation passed for %d table(s): %s",
+        len(report),
+        ", ".join(f"{n}({r['rows']:,}x{r['columns']})" for n, r in report.items()),
+    )
+    return report
 
 
 def validate_raw_tables(tables: dict[str, pd.DataFrame], *,

@@ -23,6 +23,20 @@ class DataValidationError(ModeliumError):
     """
 
 
+class InferenceSchemaError(DataValidationError):
+    """Raised when scoring input cannot be reconciled with the training feature schema.
+
+    A subclass of `DataValidationError` so callers that already catch data-contract
+    failures keep working, while code that cares specifically about training/serving
+    schema drift can catch this alone.
+
+    Missing columns are fatal rather than imputed: a column the model was trained on but
+    which inference cannot supply means the two sides disagree about what the features
+    are, and filling it with a training median would hide that behind a plausible-looking
+    prediction.
+    """
+
+
 class ModelArtifactError(ModeliumError):
     """Raised when a model artifact cannot fulfil its inference contract.
 

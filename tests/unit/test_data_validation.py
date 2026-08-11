@@ -19,8 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.data_validation import (
+    INFERENCE_TABLES,
     REQUIRED_COLUMNS,
     validate_identifiers,
+    validate_inference_tables,
     validate_not_empty,
     validate_raw_files,
     validate_raw_tables,
@@ -243,3 +245,85 @@ def test_all_problems_reported_together(valid_tables) -> None:
     message = str(exc.value)
     assert "AMT_CREDIT" in message
     assert "bureau" in message
+
+
+# ------------------------------------------- Step 5 §11: the inference-side contract
+
+def _inference_tables(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """What a scoring run actually loads: no application_train, no TARGET anywhere."""
+    return {name: df for name, df in tables.items() if name in INFERENCE_TABLES}
+
+
+def test_inference_tables_pass_without_application_train(valid_tables) -> None:
+    """The training contract demands application_train and a two-class TARGET; a
+    scoring run has neither, so it needs its own validator."""
+    report = validate_inference_tables(_inference_tables(valid_tables))
+    assert report["application_test"]["rows"] == 2
+    assert "application_train" not in report
+
+
+def test_inference_does_not_require_target(valid_tables) -> None:
+    """§7: no TARGET column anywhere in the inference input, and that is not an error."""
+    tables = _inference_tables(valid_tables)
+    assert all("TARGET" not in df.columns for df in tables.values())
+    validate_inference_tables(tables)
+
+
+def test_inference_rejects_a_missing_required_table(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    del tables["bureau_balance"]
+    with pytest.raises(DataValidationError, match="bureau_balance"):
+        validate_inference_tables(tables)
+
+
+def test_inference_rejects_missing_application_test(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    del tables["application_test"]
+    with pytest.raises(DataValidationError, match="application_test"):
+        validate_inference_tables(tables)
+
+
+def test_inference_rejects_empty_application_test(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    tables["application_test"] = tables["application_test"].iloc[0:0]
+    with pytest.raises(DataValidationError, match="empty"):
+        validate_inference_tables(tables)
+
+
+def test_inference_rejects_missing_sk_id_curr(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    tables["application_test"] = tables["application_test"].drop(columns=["SK_ID_CURR"])
+    with pytest.raises(DataValidationError, match="SK_ID_CURR"):
+        validate_inference_tables(tables)
+
+
+def test_inference_rejects_null_sk_id_curr(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    tables["application_test"].loc[0, "SK_ID_CURR"] = np.nan
+    with pytest.raises(DataValidationError, match="null"):
+        validate_inference_tables(tables)
+
+
+def test_inference_rejects_duplicate_sk_id_curr(valid_tables) -> None:
+    """A duplicate applicant fans the joins out and silently multiplies predictions."""
+    tables = _inference_tables(valid_tables)
+    tables["application_test"] = pd.concat([tables["application_test"]] * 2, ignore_index=True)
+    with pytest.raises(DataValidationError, match="duplicate"):
+        validate_inference_tables(tables)
+
+
+def test_inference_rejects_missing_join_keys(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    tables["bureau"] = tables["bureau"].drop(columns=["SK_ID_BUREAU"])
+    with pytest.raises(DataValidationError, match="SK_ID_BUREAU"):
+        validate_inference_tables(tables)
+
+
+def test_inference_reports_all_problems_together(valid_tables) -> None:
+    tables = _inference_tables(valid_tables)
+    tables["application_test"] = tables["application_test"].drop(columns=["AMT_CREDIT"])
+    tables["installments"] = tables["installments"].iloc[0:0]
+    with pytest.raises(DataValidationError) as exc:
+        validate_inference_tables(tables)
+    message = str(exc.value)
+    assert "AMT_CREDIT" in message and "installments" in message

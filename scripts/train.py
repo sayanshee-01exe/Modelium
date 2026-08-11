@@ -22,6 +22,7 @@ Nothing above the "FINAL TEST EVALUATION" banner may read the test split.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -163,6 +164,9 @@ def main():
 
     metadata = {
         "model_name": best_name,
+        # Which training run produced the artifact being served. Without it, a stale
+        # champion_pipeline.joblib on disk is indistinguishable from a fresh one.
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "optimal_threshold": frozen_threshold,
         "threshold_selected_on": "validation",
         "champion_selected_on": "validation",

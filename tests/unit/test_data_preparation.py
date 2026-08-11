@@ -23,7 +23,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.data_preparation import split_train_val_test
+from src.data.data_preparation import build_relational_feature_table, split_train_val_test
+from src.utils.exceptions import DataValidationError
 
 
 @pytest.fixture
@@ -164,3 +165,102 @@ def test_mismatched_lengths_raise_value_error(imbalanced_data) -> None:
 def test_empty_input_raises_value_error() -> None:
     with pytest.raises(ValueError):
         split_train_val_test(pd.DataFrame({"a": []}), pd.Series([], dtype=int))
+
+
+# ------------------------- Step 5 §6/§16: one relational builder, two applicant tables
+
+@pytest.fixture
+def relational_tables() -> dict[str, pd.DataFrame]:
+    """Train and test applicants over the *same* child tables, as in production.
+
+    application_train carries TARGET; application_test does not. Everything else is
+    identical, which is the whole point — one aggregation implementation, two callers.
+    """
+    rng = np.random.default_rng(5)
+    train_ids = np.arange(1, 21)
+    test_ids = np.arange(101, 116)
+    all_ids = np.concatenate([train_ids, test_ids])
+
+    def applicants(ids):
+        return pd.DataFrame({
+            "SK_ID_CURR": ids,
+            "AMT_INCOME_TOTAL": rng.uniform(50_000, 300_000, len(ids)),
+            "AMT_CREDIT": rng.uniform(100_000, 900_000, len(ids)),
+            "AMT_ANNUITY": rng.uniform(5_000, 50_000, len(ids)),
+        })
+
+    child = lambda col: pd.DataFrame({                                  # noqa: E731
+        "SK_ID_CURR": np.repeat(all_ids, 2),
+        "SK_ID_PREV": np.arange(2 * len(all_ids)),
+        col: rng.uniform(0, 1000, 2 * len(all_ids)),
+    })
+    return {
+        "application_train": applicants(train_ids).assign(
+            TARGET=rng.integers(0, 2, len(train_ids))),
+        "application_test": applicants(test_ids),
+        "bureau": pd.DataFrame({
+            "SK_ID_CURR": np.repeat(all_ids, 2),
+            "SK_ID_BUREAU": np.arange(2 * len(all_ids)),
+            "AMT_CREDIT_SUM": rng.uniform(1_000, 90_000, 2 * len(all_ids)),
+        }),
+        "bureau_balance": pd.DataFrame({
+            "SK_ID_BUREAU": np.arange(2 * len(all_ids)),
+            "MONTHS_BALANCE": rng.integers(-60, 0, 2 * len(all_ids)),
+        }),
+        "previous_application": child("AMT_APPLICATION"),
+        "pos_cash": child("CNT_INSTALMENT"),
+        "credit_card": child("AMT_BALANCE"),
+        "installments": child("AMT_PAYMENT"),
+    }
+
+
+def test_builder_defaults_to_application_train(relational_tables) -> None:
+    """Step 1-4 behaviour is unchanged: the default caller keeps working untouched."""
+    default = build_relational_feature_table(relational_tables)
+    explicit = build_relational_feature_table(relational_tables, "application_train")
+    pd.testing.assert_frame_equal(default, explicit)
+
+
+def test_builder_works_for_application_train(relational_tables) -> None:
+    out = build_relational_feature_table(relational_tables, "application_train")
+    assert len(out) == 20
+    assert "TARGET" in out.columns
+
+
+def test_builder_works_for_application_test(relational_tables) -> None:
+    out = build_relational_feature_table(relational_tables, "application_test")
+    assert len(out) == 15
+
+
+def test_inference_table_does_not_require_target(relational_tables) -> None:
+    """§7: TARGET is training-only. Aggregation must never read or invent it."""
+    out = build_relational_feature_table(relational_tables, "application_test")
+    assert "TARGET" not in out.columns
+
+
+def test_inference_table_preserves_sk_id_curr(relational_tables) -> None:
+    out = build_relational_feature_table(relational_tables, "application_test")
+    assert list(out["SK_ID_CURR"]) == list(relational_tables["application_test"]["SK_ID_CURR"])
+
+
+def test_both_applicant_tables_produce_the_same_features(relational_tables) -> None:
+    """§12 parity: identical engineered columns, TARGET aside.
+
+    A column present in one and not the other means the model would be scored on a
+    feature space it was not trained on.
+    """
+    train = build_relational_feature_table(relational_tables, "application_train")
+    test = build_relational_feature_table(relational_tables, "application_test")
+    assert set(train.columns) - {"TARGET"} == set(test.columns)
+
+
+def test_builder_rejects_an_unknown_applicant_table(relational_tables) -> None:
+    with pytest.raises(DataValidationError, match="application_holdout"):
+        build_relational_feature_table(relational_tables, "application_holdout")
+
+
+def test_builder_does_not_mutate_input_tables(relational_tables) -> None:
+    snapshot = {name: df.copy(deep=True) for name, df in relational_tables.items()}
+    build_relational_feature_table(relational_tables, "application_test")
+    for name, df in relational_tables.items():
+        pd.testing.assert_frame_equal(df, snapshot[name])

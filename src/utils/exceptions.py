@@ -21,3 +21,11 @@ class DataValidationError(ModeliumError):
     Covers missing files, missing or empty tables, absent required columns, invalid
     target values, and null or duplicated join keys.
     """
+
+
+class ModelArtifactError(ModeliumError):
+    """Raised when a model artifact cannot fulfil its inference contract.
+
+    Covers a champion that is not a full preprocessing+model pipeline, and therefore
+    could not score raw data after being reloaded.
+    """

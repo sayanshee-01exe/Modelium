@@ -48,7 +48,7 @@ from src.models.evaluation import (
     PRIMARY_METRIC, evaluate_model, evaluate_at_threshold, get_probability_scores,
 )
 from src.models.threshold import find_f1_optimal_threshold
-from src.models.serialization import save_production_bundle
+from src.models.serialization import save_champion_pipeline
 from src.utils.logger import get_logger
 
 logger = get_logger("modelium.train")
@@ -195,8 +195,9 @@ def main():
         "dropped_columns": dropped,
     }
     # best_model IS the full preprocessing+model pipeline, so the serialized artifact
-    # accepts raw frames directly: champion.predict_proba(raw_dataframe).
-    save_production_bundle(best_model, champion_preprocessor, metadata, MODEL_DIR, ARTIFACT_DIR)
+    # accepts raw frames directly: champion.predict_proba(raw_dataframe). The frozen
+    # threshold rides in metadata, since a sklearn Pipeline cannot carry one.
+    save_champion_pipeline(best_model, metadata, MODEL_DIR, ARTIFACT_DIR)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     leaderboard.to_csv(ARTIFACT_DIR / "validation_leaderboard.csv", index=False)
     pd.DataFrame(summarize_tuning(searches)).to_csv(

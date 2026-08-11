@@ -77,7 +77,8 @@ SEARCH_SPACES: dict[str, dict[str, list[Any]]] = {
 }
 
 
-def build_tunable_models(random_state: int = 42, scale_pos_weight: float = 1.0) -> dict:
+def build_tunable_models(random_state: int = 42, scale_pos_weight: float = 1.0,
+                         estimator_n_jobs: int = 1) -> dict:
     """Return unfitted base estimators for the three tunable models.
 
     Imbalance is handled by the estimator rather than by resampling: `class_weight` for
@@ -88,17 +89,23 @@ def build_tunable_models(random_state: int = 42, scale_pos_weight: float = 1.0) 
     Args:
         random_state: Seed, so a rerun reproduces the same fits.
         scale_pos_weight: Typically ``(negatives / positives)`` from the training split.
+        estimator_n_jobs: Threads *per estimator*. Defaults to 1 on purpose: the search
+            already parallelises across candidates with ``n_jobs=-1``, and letting each
+            estimator also claim every core oversubscribes the machine (8 workers x 8
+            threads on an 8-core box), which is slower than either strategy alone. Raise
+            it only when fitting an estimator outside a search.
     """
     return {
         "Random Forest": RandomForestClassifier(
-            class_weight="balanced", random_state=random_state, n_jobs=-1,
+            class_weight="balanced", random_state=random_state, n_jobs=estimator_n_jobs,
         ),
         "XGBoost": xgb.XGBClassifier(
             scale_pos_weight=scale_pos_weight, eval_metric="aucpr", tree_method="hist",
-            random_state=random_state, n_jobs=-1,
+            random_state=random_state, n_jobs=estimator_n_jobs,
         ),
         "LightGBM": lgb.LGBMClassifier(
-            class_weight="balanced", random_state=random_state, n_jobs=-1, verbose=-1,
+            class_weight="balanced", random_state=random_state, n_jobs=estimator_n_jobs,
+            verbose=-1,
         ),
     }
 
@@ -149,7 +156,9 @@ def tune_model(
         cv_folds: Stratified folds per candidate.
         scoring: Optimisation metric. Average Precision by default.
         random_state: Seed for both the sampler and the fold split.
-        n_jobs: Parallel workers.
+        n_jobs: Parallel workers *for the search*. The estimators themselves are built
+            single-threaded (see `build_tunable_models`) so the two layers do not
+            compete for the same cores.
         verbose: Passed through to the search.
         preprocessor: Optional transformer override; see `build_tuning_pipeline`.
 

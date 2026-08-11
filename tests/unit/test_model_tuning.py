@@ -250,3 +250,47 @@ def test_tune_candidates_rejects_unknown_model(raw_xy) -> None:
     X, y = raw_xy
     with pytest.raises(ValueError, match="Unknown"):
         tune_candidates(X, y, models=["Nonexistent"], n_iter=2, cv_folds=2)
+
+
+# ------------------------------------------------- §13: no nested CPU oversubscription
+
+def test_tuned_estimators_do_not_self_parallelise() -> None:
+    """One parallelism layer only.
+
+    RandomizedSearchCV fans out across candidates with n_jobs=-1. If each estimator
+    also grabbed every core, an 8-core box would run 8 workers x 8 threads = 64
+    threads contending for 8 cores, which is slower than either strategy alone.
+    """
+    for name, model in build_tunable_models(random_state=42).items():
+        assert model.get_params()["n_jobs"] == 1, f"{name} would oversubscribe inside the search"
+
+
+def test_search_owns_the_parallelism(raw_xy) -> None:
+    X, y = raw_xy
+    search = tune_model(build_tunable_models(42)["Random Forest"],
+                        SEARCH_SPACES["Random Forest"], X, y,
+                        n_iter=2, cv_folds=2, random_state=42)
+    assert search.n_jobs == -1
+
+
+# ------------------------------------------------------ §15: baseline uses a Pipeline
+
+def test_baseline_is_a_pipeline_with_preprocessing(raw_xy) -> None:
+    """The baseline must share the tuned models' preprocessing contract, or the
+    comparison measures two data treatments rather than two algorithms."""
+    from src.models.train import build_baseline_pipeline
+
+    X, y = raw_xy
+    baseline = build_baseline_pipeline(X, random_state=42)
+    assert isinstance(baseline, Pipeline)
+    assert list(baseline.named_steps) == [PREPROCESSOR_STEP, MODEL_STEP]
+
+
+def test_baseline_fits_and_predicts_from_raw_frames(raw_xy) -> None:
+    from src.models.train import build_baseline_pipeline
+
+    X, y = raw_xy
+    baseline = build_baseline_pipeline(X, random_state=42)
+    baseline.fit(X, y)
+    proba = baseline.predict_proba(X)[:, 1]
+    assert proba.shape == (len(y),) and np.isfinite(proba).all()

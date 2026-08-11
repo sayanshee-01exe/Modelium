@@ -17,9 +17,11 @@ def build_baseline_model(random_state: int = 42):
     cannot beat a linear model on Average Precision is not worth its complexity, and
     without a fixed reference point that comparison is unavailable.
     """
+    # No n_jobs: it has had no effect on LogisticRegression since sklearn 1.8 and is
+    # removed in 1.10. Passing it only emits a FutureWarning.
     return LogisticRegression(
         class_weight="balanced", C=.1, solver="saga", max_iter=1000,
-        random_state=random_state, n_jobs=-1,
+        random_state=random_state,
     )
 
 
@@ -48,7 +50,7 @@ def build_candidate_models(random_state: int, scale_pos_weight: float = 1.0):
     return OrderedDict({
         "Logistic Regression": LogisticRegression(
             class_weight="balanced", C=.1, solver="saga", max_iter=1000,
-            random_state=random_state, n_jobs=-1,
+            random_state=random_state,
         ),
         "SVM (Linear)": CalibratedClassifierCV(
             LinearSVC(class_weight="balanced", C=.1, max_iter=2000, random_state=random_state), cv=3

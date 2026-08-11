@@ -30,7 +30,9 @@ from src.data.data_validation import validate_raw_files, validate_raw_tables
 from src.data.data_cleaning import optimize_memory, drop_low_information_columns
 from src.data.data_preparation import build_relational_feature_table, split_train_val_test
 from src.features.feature_engineering import add_domain_features
-from src.features.data_preprocessing import build_preprocessor
+from src.features.data_preprocessing import (
+    build_preprocessor, get_input_feature_names, get_output_feature_names,
+)
 from src.models.train import build_candidate_models, train_models
 from src.models.evaluation import evaluate_model, evaluate_at_threshold, get_probability_scores
 from src.models.threshold import find_f1_optimal_threshold
@@ -135,6 +137,12 @@ def main():
         "target": TARGET_COL,
         "id_column": ID_COL,
         "raw_feature_columns": X.columns.tolist(),
+        # The schema contract an inference caller must satisfy, taken from the fitted
+        # preprocessor rather than from X, plus the transformed names SHAP and feature
+        # importance need to label an otherwise anonymous float matrix.
+        "input_feature_columns": get_input_feature_names(preprocessor),
+        "transformed_feature_names": get_output_feature_names(preprocessor),
+        "n_transformed_features": len(get_output_feature_names(preprocessor)),
         "dropped_columns": dropped,
     }
     save_production_bundle(best_model, preprocessor, metadata, MODEL_DIR, ARTIFACT_DIR)

@@ -29,7 +29,6 @@ from src.features.data_preprocessing import (
     get_input_feature_names,
     get_output_feature_names,
 )
-from src.utils.exceptions import DataValidationError
 
 
 @pytest.fixture
@@ -271,12 +270,45 @@ def test_align_drops_extra_columns(frames) -> None:
     ]
 
 
-def test_align_raises_on_missing_columns(frames) -> None:
-    """Silently training on one layout and serving another is the failure to prevent."""
+def test_align_adds_missing_columns_as_nan(frames) -> None:
+    """A caller short of a feature still scores; the imputer fills the gap downstream."""
     train, _, _ = frames
-    with pytest.raises(DataValidationError) as exc:
+    expected = ["num_a", "num_b", "cat_a"]
+    aligned = align_to_training_schema(train.drop(columns=["num_b"]), expected)
+    assert list(aligned.columns) == expected
+    assert aligned["num_b"].isna().all(), "added column must be entirely NaN"
+    assert len(aligned) == len(train)
+
+
+def test_align_added_column_is_imputed_by_the_pipeline(frames) -> None:
+    """The added NaNs must survive transform — proving alignment and preprocessing agree."""
+    train, _, test = frames
+    pre = build_preprocessor(train)
+    pre.fit(train)
+    expected = get_input_feature_names(pre)
+
+    degraded = align_to_training_schema(test.drop(columns=["num_b"]), expected)
+    out = np.asarray(pre.transform(degraded), dtype=float)
+    assert np.isfinite(out).all(), "median imputation should have filled the added column"
+
+
+def test_align_warns_when_adding_missing_columns(frames, caplog) -> None:
+    """§4 requires the schema change not be silent, since an added NaN is imputed to
+    the training median — the model then scores a value the caller never supplied."""
+    train, _, _ = frames
+    with caplog.at_level("WARNING"):
         align_to_training_schema(train.drop(columns=["num_b"]), ["num_a", "num_b", "cat_a"])
-    assert "num_b" in str(exc.value)
+    assert "num_b" in caplog.text
+
+
+def test_align_handles_missing_and_extra_together(frames) -> None:
+    train, _, _ = frames
+    expected = ["num_a", "num_b", "cat_a"]
+    messy = train.drop(columns=["num_b"]).assign(unexpected=1)[["unexpected", "cat_a", "num_a"]]
+    aligned = align_to_training_schema(messy, expected)
+    assert list(aligned.columns) == expected
+    assert aligned["num_b"].isna().all()
+    assert "unexpected" not in aligned.columns
 
 
 def test_align_does_not_mutate_input(frames) -> None:

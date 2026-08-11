@@ -19,7 +19,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
-from src.utils.exceptions import DataValidationError
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -148,13 +147,20 @@ def get_input_feature_names(preprocessor: ColumnTransformer) -> list[str]:
 
 
 def align_to_training_schema(df: pd.DataFrame, expected_columns: list[str]) -> pd.DataFrame:
-    """Coerce an inference frame to the exact training column layout.
+    """Coerce a frame to the exact training column layout.
 
     Handles the three ways a caller can drift from the training schema:
-      - **missing** columns  -> raise, since imputing an absent feature would silently
-        score the applicant against a value the model never saw them provide
-      - **extra** columns    -> dropped, with a log line
+      - **missing** columns  -> added as all-NaN, so the numeric imputer fills them
+        downstream and a partially-specified applicant can still be scored
+      - **extra** columns    -> dropped
       - **wrong order**      -> reordered
+
+    Both drift cases are logged at WARNING, never applied silently. An added column is
+    imputed to the *training median*, which means the model scores a value the caller
+    never actually supplied — usable for a partial record, but the log line is what
+    makes that visible rather than invisible.
+
+    The input frame is not modified; a new frame is returned.
 
     Args:
         df: Frame to align.
@@ -162,19 +168,20 @@ def align_to_training_schema(df: pd.DataFrame, expected_columns: list[str]) -> p
 
     Returns:
         A new frame containing exactly `expected_columns`, in that order.
-
-    Raises:
-        DataValidationError: if any expected column is absent.
     """
-    missing = [c for c in expected_columns if c not in df.columns]
-    if missing:
-        raise DataValidationError(
-            f"Input is missing {len(missing)} column(s) required by the fitted "
-            f"preprocessor: {sorted(missing)}"
-        )
+    aligned = df.copy()
 
-    extra = [c for c in df.columns if c not in expected_columns]
+    missing = [c for c in expected_columns if c not in aligned.columns]
+    if missing:
+        logger.warning(
+            "Adding %d column(s) absent from the input as NaN (will be imputed): %s",
+            len(missing), sorted(missing),
+        )
+        for column in missing:
+            aligned[column] = np.nan
+
+    extra = [c for c in aligned.columns if c not in expected_columns]
     if extra:
         logger.warning("Dropping %d unexpected input column(s): %s", len(extra), sorted(extra))
 
-    return df.loc[:, expected_columns].copy()
+    return aligned.loc[:, expected_columns]

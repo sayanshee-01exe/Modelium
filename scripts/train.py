@@ -31,7 +31,8 @@ from src.data.data_cleaning import optimize_memory, drop_low_information_columns
 from src.data.data_preparation import build_relational_feature_table, split_train_val_test
 from src.features.feature_engineering import add_domain_features
 from src.features.data_preprocessing import (
-    build_preprocessor, get_input_feature_names, get_output_feature_names,
+    align_to_training_schema, build_preprocessor,
+    get_input_feature_names, get_output_feature_names,
 )
 from src.models.train import build_candidate_models, train_models
 from src.models.evaluation import evaluate_model, evaluate_at_threshold, get_probability_scores
@@ -80,8 +81,14 @@ def main():
     # either can leak into the fitted imputers, encoder categories, or scaler.
     preprocessor = build_preprocessor(X_train)
     X_train_t = preprocessor.fit_transform(X_train)
-    X_val_t = preprocessor.transform(X_val)
-    X_test_t = preprocessor.transform(X_test)
+
+    # Align before transforming. The three splits come from one frame so their layouts
+    # already match, making this a no-op here — it is kept because it exercises the same
+    # schema contract inference will depend on, so a future layout drift fails loudly in
+    # training rather than silently at serving time.
+    training_columns = get_input_feature_names(preprocessor)
+    X_val_t = preprocessor.transform(align_to_training_schema(X_val, training_columns))
+    X_test_t = preprocessor.transform(align_to_training_schema(X_test, training_columns))
 
     scale_pos_weight = float((y_train == 0).sum() / (y_train == 1).sum())
     candidates = build_candidate_models(RANDOM_STATE, scale_pos_weight)

@@ -5,7 +5,17 @@ The artifact saved in Step 4 is a complete ``Pipeline([("preprocessor", ...),
 loads that pipeline, reconciles the caller's columns with the schema the pipeline was
 fitted on, and applies the decision threshold that was frozen on validation.
 
-Two things it deliberately does not do:
+Every artifact is validated before it can score anything:
+
+    metadata fields -> promotion status -> threshold -> classifier classes -> schema
+
+The checks share a theme: each guards a failure that would otherwise produce
+**well-formed but wrong output** rather than a crash. A rejected model still returns
+probabilities; a NaN threshold still returns classes (all zero); a guessed
+probability column still returns numbers in [0, 1]. None of that would be caught
+downstream, so it is caught here, at load.
+
+Three things it deliberately does not do:
 
 *Refit anything.* There is no `fit`, no `fit_transform`, and no code path that reaches
 one. Preprocessing at inference is transform-only, using statistics learned from the
@@ -16,6 +26,10 @@ same file.
 *Fall back to 0.5.* `predict` applies the threshold from metadata. sklearn's own
 `predict` hard-codes 0.5, which is not the cut-off this project selected, so calling it
 on the champion would silently score at the wrong operating point.
+
+*Serve an unpromoted champion.* A model is unpromoted precisely because Step 4 measured
+it and found it wanting. Scoring it needs an explicit `allow_unpromoted=True`, which
+exists for debugging and is off by default.
 
 Schema policy (training is the authority, never the batch):
 
@@ -28,6 +42,7 @@ Schema policy (training is the authority, never the batch):
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import joblib
@@ -46,6 +61,21 @@ logger = get_logger(__name__)
 PREPROCESSOR_STEP = "preprocessor"
 MODEL_STEP = "model"
 
+# Production-critical metadata. None of these has a safe default, so all are required:
+# a missing 'promoted' must never read as approved, and a missing 'optimal_threshold'
+# must never fall back to 0.5. Names match the keys scripts/train.py actually writes.
+REQUIRED_METADATA_KEYS: tuple[str, ...] = (
+    "model_name",               # which champion this is
+    "optimal_threshold",        # frozen on validation in Step 4
+    "promoted",                 # passed its quality gates
+    "input_feature_columns",    # the raw feature contract
+)
+
+# The target is binary default / non-default. Anything else is a different problem, and
+# scoring it through this Predictor would misinterpret the probability columns.
+EXPECTED_CLASSES = frozenset({0, 1})
+POSITIVE_CLASS = 1
+
 ID_OUTPUT_COLUMN = "SK_ID_CURR"
 PROBABILITY_COLUMN = "DEFAULT_PROBABILITY"
 CLASS_COLUMN = "PREDICTED_CLASS"
@@ -63,19 +93,59 @@ class Predictor:
         metadata: The deployment metadata sidecar.
     """
 
-    def __init__(self, pipeline, metadata: dict):
+    def __init__(self, pipeline, metadata: dict, *, allow_unpromoted: bool = False):
+        """Validate the artifact end to end, then hold it ready for scoring.
+
+        Every check runs at construction rather than at first predict, so a bad artifact
+        fails on load instead of halfway through a batch — or, worse, silently produces
+        plausible numbers for the whole batch.
+
+        Args:
+            pipeline: Fitted `Pipeline` with a preprocessing step and a model step.
+            metadata: Deployment metadata sidecar.
+            allow_unpromoted: Debugging escape hatch. Scores a champion that failed its
+                Step 4 quality gates. Defaults to False and must stay that way: a model
+                is unpromoted precisely because it was measured and found wanting, and
+                the only thing worse than no prediction is a confidently wrong one.
+
+        Raises:
+            ModelArtifactError: for any artifact that cannot be served safely.
+        """
+        self._validate_pipeline_shape(pipeline)
+        self.pipeline = pipeline
+        self.metadata = dict(metadata or {})
+
+        # Order mirrors the documented safety flow: metadata -> promotion -> threshold
+        # -> classifier -> (schema, per batch).
+        self._validate_required_metadata()
+        self._check_promotion(allow_unpromoted)
+        self._threshold = self._resolve_threshold()
+        self._positive_index = self._resolve_positive_class_index()
+
+        self._id_column = str(self.metadata.get("id_column") or ID_OUTPUT_COLUMN)
+        self._expected_columns = self._resolve_expected_columns()
+
+        logger.info(
+            "Predictor ready: model=%s, threshold=%.4f, %d expected raw feature(s)",
+            self.model_name, self._threshold, len(self._expected_columns),
+        )
+
+    # -------------------------------------------------------------------- validation
+
+    @staticmethod
+    def _validate_pipeline_shape(pipeline) -> None:
+        """Reject anything that is not a fitted preprocessing+model Pipeline."""
         if not isinstance(pipeline, Pipeline):
             raise ModelArtifactError(
                 f"Predictor requires a sklearn Pipeline carrying its own preprocessing, "
                 f"got {type(pipeline).__name__}; a bare estimator cannot score raw data."
             )
-        if PREPROCESSOR_STEP not in pipeline.named_steps:
-            raise ModelArtifactError(
-                f"Champion pipeline has no '{PREPROCESSOR_STEP}' step (found: "
-                f"{list(pipeline.named_steps)}); it cannot transform raw input."
-            )
-        # Fitted-ness is checked at construction rather than at first predict, so a bad
-        # artifact fails on load instead of halfway through a batch.
+        for step in (PREPROCESSOR_STEP, MODEL_STEP):
+            if step not in pipeline.named_steps:
+                raise ModelArtifactError(
+                    f"Champion pipeline has no '{step}' step (found: "
+                    f"{list(pipeline.named_steps)}); it cannot serve raw input."
+                )
         try:
             check_is_fitted(pipeline.named_steps[PREPROCESSOR_STEP])
         except Exception as err:
@@ -84,40 +154,140 @@ class Predictor:
                 f"Inference is transform-only and will not fit it."
             ) from err
 
-        self.pipeline = pipeline
-        self.metadata = dict(metadata or {})
+    def _validate_required_metadata(self) -> None:
+        """Require every field production inference depends on.
 
-        threshold = self.metadata.get("optimal_threshold")
-        if threshold is None:
+        No field here has a safe default. Defaulting `promoted` would serve a rejected
+        model, defaulting `optimal_threshold` would score at an operating point nobody
+        selected, and defaulting the feature list would invent a schema contract. All
+        missing fields are reported at once — an artifact broken in one way is usually
+        broken in several.
+        """
+        missing = [
+            key for key in REQUIRED_METADATA_KEYS
+            if key not in self.metadata or self.metadata[key] is None
+        ]
+        if missing:
             raise ModelArtifactError(
-                "Metadata carries no 'optimal_threshold'. The threshold was frozen on "
-                "validation in Step 4 and must ship with the model; defaulting to 0.5 "
-                "would score at an operating point nobody selected."
+                f"Deployment metadata is missing required field(s): {sorted(missing)}. "
+                f"These are production-critical and have no safe defaults; regenerate "
+                f"the artifact with scripts/train.py."
             )
-        self._threshold = float(threshold)
-        self._id_column = str(self.metadata.get("id_column") or ID_OUTPUT_COLUMN)
-        self._expected_columns = self._resolve_expected_columns()
-        self._positive_index = self._resolve_positive_class_index()
 
-        logger.info(
-            "Predictor ready: model=%s, threshold=%.4f, %d expected raw feature(s)",
-            self.model_name, self._threshold, len(self._expected_columns),
+    def _check_promotion(self, allow_unpromoted: bool) -> None:
+        """Refuse to serve a champion that failed its Step 4 quality gates.
+
+        The type is checked strictly rather than coerced with `bool()`, because the
+        string ``"false"`` is truthy in Python — a malformed metadata file would
+        otherwise read as *promoted* and serve the exact model this gate exists to stop.
+        """
+        promoted = self.metadata["promoted"]
+        if not isinstance(promoted, (bool, np.bool_)):
+            raise ModelArtifactError(
+                f"Metadata field 'promoted' must be a boolean, got "
+                f"{type(promoted).__name__} ({promoted!r}). A non-boolean cannot be "
+                f"interpreted safely: coercing it risks reading a rejected model as "
+                f"approved."
+            )
+
+        if bool(promoted):
+            return
+
+        if allow_unpromoted:
+            logger.warning(
+                "Serving UNPROMOTED champion '%s' because allow_unpromoted=True. This "
+                "model failed its Step 4 quality gates: %s. Debugging use only — never "
+                "production.",
+                self.model_name, self._gate_failure_summary(),
+            )
+            return
+
+        raise ModelArtifactError(
+            f"Champion '{self.model_name}' is not promoted and will not be served. It "
+            f"failed its Step 4 quality gates: {self._gate_failure_summary()}. Retrain "
+            f"or fix the model; pass allow_unpromoted=True only for local debugging."
         )
+
+    def _gate_failure_summary(self) -> str:
+        """Which gates the champion failed, for the refusal message."""
+        failures = [
+            *(self.metadata.get("pre_threshold_gate_failures") or []),
+            *(self.metadata.get("operational_gate_failures") or []),
+        ]
+        return "; ".join(str(f) for f in failures) if failures else "no detail recorded"
+
+    def _resolve_threshold(self) -> float:
+        """Frozen decision threshold, validated as a real probability.
+
+        A threshold outside [0, 1] is not a conservative setting, it is a constant
+        classifier: above 1 nothing is ever flagged, below 0 everything is. NaN is worse
+        still — every ``>=`` comparison is False, so the model silently predicts the
+        negative class for the entire batch while looking like it ran fine.
+        """
+        raw = self.metadata["optimal_threshold"]
+
+        # bool is a subclass of int; True would otherwise sail through as 1.0.
+        if isinstance(raw, (bool, np.bool_)) or not isinstance(raw, (int, float, np.integer, np.floating)):
+            raise ModelArtifactError(
+                f"Metadata 'optimal_threshold' must be numeric, got "
+                f"{type(raw).__name__} ({raw!r})."
+            )
+
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ModelArtifactError(
+                f"Metadata 'optimal_threshold' is {value}, which is not a finite number. "
+                f"Comparisons against NaN are always False, so the model would silently "
+                f"predict the negative class for every applicant."
+            )
+        if not 0.0 <= value <= 1.0:
+            raise ModelArtifactError(
+                f"Metadata 'optimal_threshold' is {value}, outside the valid probability "
+                f"range [0, 1]; no probability could ever cross it in one direction."
+            )
+        return value
+
+    def _resolve_positive_class_index(self) -> int:
+        """Column of `predict_proba` holding P(default), located via `classes_`.
+
+        There is deliberately **no fallback** to column 1. The position depends on label
+        ordering, so guessing it would invert every score in the batch while producing
+        perfectly well-formed output — a failure that no downstream check would catch.
+        An artifact that cannot say what its classes are is not servable.
+        """
+        model = self.pipeline.named_steps[MODEL_STEP]
+        classes = getattr(model, "classes_", None)
+        if classes is None:
+            raise ModelArtifactError(
+                f"Champion model ({type(model).__name__}) exposes no 'classes_', so the "
+                f"positive-class probability column cannot be identified. Guessing it "
+                f"would invert every score."
+            )
+
+        observed = list(classes.tolist() if hasattr(classes, "tolist") else classes)
+        if set(observed) != EXPECTED_CLASSES:
+            raise ModelArtifactError(
+                f"Champion model was fitted on classes {observed}, but this project "
+                f"scores a binary 0/1 default target. Refusing to serve an incompatible "
+                f"classifier."
+            )
+        return observed.index(POSITIVE_CLASS)
 
     # ------------------------------------------------------------------ construction
 
     @classmethod
-    def load(cls, model_dir, artifact_dir) -> "Predictor":
+    def load(cls, model_dir, artifact_dir, *, allow_unpromoted: bool = False) -> "Predictor":
         """Load the champion pipeline and its metadata sidecar from disk.
 
         Args:
             model_dir: Directory holding `champion_pipeline.joblib`.
             artifact_dir: Directory holding `deployment_meta.json`.
+            allow_unpromoted: Debugging override; see `__init__`. Defaults to False.
 
         Raises:
             ModelArtifactError: if either file is absent — with the path, since "run
                 scripts/train.py first" is the usual cause and a bare FileNotFoundError
-                does not say so.
+                does not say so — or if the loaded artifact fails any safety check.
         """
         pipeline_path = Path(model_dir) / CHAMPION_PIPELINE_FILENAME
         metadata_path = Path(artifact_dir) / METADATA_FILENAME
@@ -137,7 +307,7 @@ class Predictor:
         with open(metadata_path, encoding="utf-8") as handle:
             metadata = json.load(handle)
         logger.info("Loaded champion pipeline from %s", pipeline_path)
-        return cls(pipeline, metadata)
+        return cls(pipeline, metadata, allow_unpromoted=allow_unpromoted)
 
     def _resolve_expected_columns(self) -> list[str]:
         """Raw columns the pipeline was fitted on.
@@ -162,24 +332,6 @@ class Predictor:
                 "exposes no feature names and metadata has neither "
                 "'input_feature_columns' nor 'raw_feature_columns'."
             )
-
-    def _resolve_positive_class_index(self) -> int:
-        """Column of `predict_proba` holding P(default).
-
-        Located via `classes_` rather than hard-coded to 1: the position depends on
-        label ordering, and silently reading the wrong column would invert every score.
-        """
-        classes = getattr(self.pipeline.named_steps.get(MODEL_STEP), "classes_", None)
-        if classes is None:
-            return 1
-        classes = list(classes)
-        for positive in (1, "1", True):
-            if positive in classes:
-                return classes.index(positive)
-        raise ModelArtifactError(
-            f"Champion model has no positive class among {classes}; cannot identify "
-            f"which predict_proba column holds the default probability."
-        )
 
     # -------------------------------------------------------------------- properties
 

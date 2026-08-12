@@ -20,6 +20,7 @@ pipeline was actually fitted on instead.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -42,7 +43,21 @@ PREDICTIONS_DIR = ARTIFACT_DIR / "predictions"
 PREDICTIONS_FILENAME = "test_predictions.csv"
 
 
-def main():
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--allow-unpromoted",
+        action="store_true",
+        help="Score with a champion that failed its Step 4 quality gates. Debugging "
+             "only — an unpromoted model was measured and found wanting, and its "
+             "predictions must not reach a decision.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
     # Only the tables inference actually needs. application_train is excluded: scoring
     # must not depend on the training applicants, and loading them would cost a 158 MB
     # read for nothing.
@@ -66,7 +81,8 @@ def main():
     df = add_domain_features(df)
     print(f"Inference feature table: {len(df):,} applicants x {df.shape[1]:,} columns")
 
-    predictor = Predictor.load(MODEL_DIR, ARTIFACT_DIR)
+    # Refuses an unpromoted or otherwise invalid artifact unless explicitly overridden.
+    predictor = Predictor.load(MODEL_DIR, ARTIFACT_DIR, allow_unpromoted=args.allow_unpromoted)
     print(
         f"Champion: {predictor.model_name} | frozen threshold {predictor.threshold:.4f} "
         f"| {len(predictor.expected_columns):,} expected raw features"

@@ -17,6 +17,7 @@ Small synthetic fits only — no Home Credit data.
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -25,6 +26,8 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.pipeline import Pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -37,6 +40,7 @@ from src.inference.predictor import (
     ID_OUTPUT_COLUMN,
     OUTPUT_COLUMNS,
     PROBABILITY_COLUMN,
+    REQUIRED_METADATA_KEYS,
     Predictor,
 )
 from src.models.serialization import save_champion_pipeline
@@ -69,7 +73,9 @@ def fitted_pipeline():
 
 @pytest.fixture
 def metadata():
+    """A complete, promoted artifact's metadata — every production-critical field set."""
     return {"model_name": "Logistic Regression", "optimal_threshold": 0.35,
+            "promoted": True, "input_feature_columns": list(FEATURES),
             "id_column": "SK_ID_CURR", "target": "TARGET",
             "primary_metric": "Average Precision"}
 
@@ -132,10 +138,232 @@ def test_rejects_an_unfitted_pipeline(metadata):
         Predictor(build_baseline_pipeline(X, random_state=42), metadata)
 
 
-def test_missing_threshold_is_fatal_rather_than_defaulting_to_half(fitted_pipeline):
-    """§20: never silently score at 0.5 when the frozen threshold is unavailable."""
+def test_missing_threshold_is_fatal_rather_than_defaulting_to_half(fitted_pipeline, metadata):
+    """Never silently score at 0.5 when the frozen threshold is unavailable."""
+    del metadata["optimal_threshold"]
     with pytest.raises(ModelArtifactError, match="optimal_threshold"):
-        Predictor(fitted_pipeline, {"model_name": "m"})
+        Predictor(fitted_pipeline, metadata)
+
+
+# =====================================================================================
+# Hardening: an invalid artifact must fail loudly at load, not produce plausible output.
+#
+# Every check below guards a failure mode whose symptom is *well-formed but wrong*
+# output — a rejected model still returns probabilities, a NaN threshold still returns
+# classes, a guessed probability column still returns numbers in [0, 1]. None would be
+# caught downstream.
+# =====================================================================================
+
+# ---------------------------------------------------------------- promotion gating
+
+def test_promoted_model_is_served(fitted_pipeline, metadata, scoring_frame):
+    predictor = Predictor(fitted_pipeline, metadata)
+    assert len(predictor.predict_dataframe(scoring_frame)) == len(scoring_frame)
+
+
+def test_unpromoted_model_is_refused(fitted_pipeline, metadata):
+    """The core of this hardening pass: a model that failed its gates does not serve."""
+    metadata["promoted"] = False
+    with pytest.raises(ModelArtifactError, match="not promoted"):
+        Predictor(fitted_pipeline, metadata)
+
+
+def test_refusal_names_the_failed_gates(fitted_pipeline, metadata):
+    """The operator needs to know *why* it was rejected, not just that it was."""
+    metadata["promoted"] = False
+    metadata["operational_gate_failures"] = ["Recall=0.3882 is below the required 0.4"]
+    with pytest.raises(ModelArtifactError, match="Recall=0.3882"):
+        Predictor(fitted_pipeline, metadata)
+
+
+def test_allow_unpromoted_permits_debugging(fitted_pipeline, metadata, scoring_frame):
+    metadata["promoted"] = False
+    predictor = Predictor(fitted_pipeline, metadata, allow_unpromoted=True)
+    assert len(predictor.predict_dataframe(scoring_frame)) == len(scoring_frame)
+
+
+def test_allow_unpromoted_defaults_to_false(fitted_pipeline, metadata):
+    """Production safety must not depend on the caller remembering to ask for it."""
+    assert inspect.signature(Predictor.__init__).parameters["allow_unpromoted"].default is False
+    assert inspect.signature(Predictor.load).parameters["allow_unpromoted"].default is False
+
+    metadata["promoted"] = False
+    with pytest.raises(ModelArtifactError):
+        Predictor(fitted_pipeline, metadata)          # no override passed
+
+
+def test_load_refuses_an_unpromoted_artifact_from_disk(fitted_pipeline, metadata, tmp_path):
+    metadata["promoted"] = False
+    save_champion_pipeline(fitted_pipeline, metadata, tmp_path / "models", tmp_path / "artifacts")
+    with pytest.raises(ModelArtifactError, match="not promoted"):
+        Predictor.load(tmp_path / "models", tmp_path / "artifacts")
+
+
+def test_load_honours_the_override_from_disk(fitted_pipeline, metadata, tmp_path):
+    metadata["promoted"] = False
+    save_champion_pipeline(fitted_pipeline, metadata, tmp_path / "models", tmp_path / "artifacts")
+    predictor = Predictor.load(tmp_path / "models", tmp_path / "artifacts", allow_unpromoted=True)
+    assert predictor.threshold == pytest.approx(0.35)
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_non_boolean_promoted_is_rejected(fitted_pipeline, metadata, value):
+    """The string "false" is truthy in Python.
+
+    Coercing with bool() would read a malformed metadata file as *approved* and serve
+    the exact model this gate exists to stop, so the type is checked rather than coerced.
+    """
+    metadata["promoted"] = value
+    with pytest.raises(ModelArtifactError):
+        Predictor(fitted_pipeline, metadata)
+
+
+# -------------------------------------------------------------- threshold validation
+
+@pytest.mark.parametrize("bad", [-0.1, -1.0, 1.5, 2.0])
+def test_threshold_outside_zero_one_is_rejected(fitted_pipeline, metadata, bad):
+    """Outside [0, 1] is not a strict setting, it is a constant classifier."""
+    metadata["optimal_threshold"] = bad
+    with pytest.raises(ModelArtifactError, match="range|probability"):
+        Predictor(fitted_pipeline, metadata)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_threshold_is_rejected(fitted_pipeline, metadata, bad):
+    """NaN is the dangerous one: every `>=` is False, so the batch scores all-negative."""
+    metadata["optimal_threshold"] = bad
+    with pytest.raises(ModelArtifactError, match="finite"):
+        Predictor(fitted_pipeline, metadata)
+
+
+@pytest.mark.parametrize("bad", ["0.5", "high", [0.5], {"value": 0.5}, True])
+def test_non_numeric_threshold_is_rejected(fitted_pipeline, metadata, bad):
+    metadata["optimal_threshold"] = bad
+    with pytest.raises(ModelArtifactError, match="numeric"):
+        Predictor(fitted_pipeline, metadata)
+
+
+@pytest.mark.parametrize("ok", [0.0, 0.5, 1.0, 0.5987])
+def test_valid_thresholds_are_accepted(fitted_pipeline, metadata, ok):
+    metadata["optimal_threshold"] = ok
+    assert Predictor(fitted_pipeline, metadata).threshold == pytest.approx(ok)
+
+
+def test_nan_threshold_would_have_scored_everything_negative(fitted_pipeline, metadata):
+    """Shows what the guard prevents, so the test documents the risk rather than a rule."""
+    proba = Predictor(fitted_pipeline, metadata).predict_proba(_raw_frame(20, seed=7)[0])
+    assert (proba >= float("nan")).sum() == 0        # silent all-negative batch
+    metadata["optimal_threshold"] = float("nan")
+    with pytest.raises(ModelArtifactError):
+        Predictor(fitted_pipeline, metadata)
+
+
+# --------------------------------------------------------------- metadata validation
+
+@pytest.mark.parametrize("field", REQUIRED_METADATA_KEYS)
+def test_each_required_metadata_field_is_enforced(fitted_pipeline, metadata, field):
+    del metadata[field]
+    with pytest.raises(ModelArtifactError, match=field):
+        Predictor(fitted_pipeline, metadata)
+
+
+@pytest.mark.parametrize("field", REQUIRED_METADATA_KEYS)
+def test_a_null_required_field_counts_as_missing(fitted_pipeline, metadata, field):
+    metadata[field] = None
+    with pytest.raises(ModelArtifactError, match=field):
+        Predictor(fitted_pipeline, metadata)
+
+
+def test_all_missing_fields_are_reported_together(fitted_pipeline, metadata):
+    """An artifact broken in one way is usually broken in several."""
+    del metadata["promoted"], metadata["model_name"]
+    with pytest.raises(ModelArtifactError) as exc:
+        Predictor(fitted_pipeline, metadata)
+    assert "promoted" in str(exc.value) and "model_name" in str(exc.value)
+
+
+def test_required_metadata_covers_the_production_critical_fields() -> None:
+    assert set(REQUIRED_METADATA_KEYS) == {
+        "model_name", "optimal_threshold", "promoted", "input_feature_columns",
+    }
+
+
+def test_empty_metadata_is_rejected(fitted_pipeline):
+    with pytest.raises(ModelArtifactError):
+        Predictor(fitted_pipeline, {})
+
+
+# ------------------------------------------------------------- classifier validation
+
+class _StubClassifier(BaseEstimator, ClassifierMixin):
+    """Fitted-looking classifier with controllable `classes_`.
+
+    Returns ``[0.4, 0.6]`` for every row, so which column the Predictor reads is
+    directly observable in the output. `fit` is a landmine: inference must never reach it.
+    """
+
+    def __init__(self, classes=None):
+        self.classes = classes
+        if classes is not None:
+            self.classes_ = np.asarray(classes)
+
+    def fit(self, X, y=None):
+        raise AssertionError("inference must never call fit()")
+
+    def predict_proba(self, X):
+        return np.tile([0.4, 0.6], (len(X), 1))
+
+
+def _pipeline_with_model(fitted_pipeline, model):
+    """Swap the model step, keeping the genuinely fitted preprocessor."""
+    return Pipeline([
+        ("preprocessor", fitted_pipeline.named_steps["preprocessor"]),
+        ("model", model),
+    ])
+
+
+def test_model_without_classes_is_rejected(fitted_pipeline, metadata):
+    """No fallback to column 1: guessing would invert every score in the batch."""
+    swapped = _pipeline_with_model(fitted_pipeline, _StubClassifier())
+    with pytest.raises(ModelArtifactError, match="classes_"):
+        Predictor(swapped, metadata)
+
+
+@pytest.mark.parametrize("classes", [
+    [0, 1, 2],              # multiclass
+    [0],                    # single class
+    ["no", "yes"],          # string labels
+    [1, 2],                 # missing class 0
+    [0, 2],                 # missing class 1
+])
+def test_incompatible_classes_are_rejected(fitted_pipeline, metadata, classes):
+    model = _StubClassifier(classes)
+    with pytest.raises(ModelArtifactError, match="classes"):
+        Predictor(_pipeline_with_model(fitted_pipeline, model), metadata)
+
+
+def test_binary_zero_one_classes_are_accepted(fitted_pipeline, metadata):
+    assert Predictor(fitted_pipeline, metadata) is not None
+    assert set(fitted_pipeline.named_steps["model"].classes_) == {0, 1}
+
+
+def test_positive_class_column_is_located_by_label_not_position(fitted_pipeline, metadata):
+    """With classes_ reversed to [1, 0], P(default) lives in column 0, not column 1.
+
+    This is the case the removed fallback got wrong: it would have read column 1 and
+    returned P(non-default) for every applicant, inverting the entire batch.
+    """
+    predictor = Predictor(_pipeline_with_model(fitted_pipeline, _StubClassifier([1, 0])), metadata)
+
+    X, _ = _raw_frame(10, seed=4)
+    # The stub returns [0.4, 0.6] per row; column 0 is P(class 1) under this ordering.
+    np.testing.assert_allclose(predictor.predict_proba(X), np.full(10, 0.4))
+
+
+def test_no_unsafe_positive_index_fallback_remains() -> None:
+    """The removed fallback returned 1 whenever classes_ was absent."""
+    source = inspect.getsource(Predictor._resolve_positive_class_index)
+    assert "return 1" not in source
 
 
 # -------------------------------------------------------------------- probabilities
@@ -356,6 +584,7 @@ def test_end_to_end_small_batch_inference(tmp_path):
     pipeline.fit(X, y)
 
     meta = {"model_name": "Logistic Regression", "optimal_threshold": 0.42,
+            "promoted": True, "input_feature_columns": list(X.columns),
             "id_column": "SK_ID_CURR"}
     save_champion_pipeline(pipeline, meta, tmp_path / "models", tmp_path / "artifacts")
 
@@ -379,7 +608,9 @@ def test_end_to_end_output_round_trips_through_csv(tmp_path):
     pipeline = build_baseline_pipeline(X, random_state=42)
     pipeline.fit(X, train_df["TARGET"].astype(int))
 
-    predictor = Predictor(pipeline, {"model_name": "m", "optimal_threshold": 0.42})
+    predictor = Predictor(pipeline, {"model_name": "m", "optimal_threshold": 0.42,
+                                     "promoted": True,
+                                     "input_feature_columns": list(X.columns)})
     test_df = add_domain_features(build_relational_feature_table(tables, "application_test"))
     predictions = predictor.predict_dataframe(test_df)
 

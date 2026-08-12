@@ -53,7 +53,8 @@ from src.models.evaluation import (
     PRIMARY_METRIC, evaluate_model, evaluate_at_threshold, get_probability_scores,
 )
 from src.models.threshold import find_f1_optimal_threshold
-from src.models.serialization import save_champion_pipeline
+from src.models.serialization import CHAMPION_PIPELINE_FILENAME, save_champion_pipeline
+from src.tracking.mlflow_tracker import PROJECT_NAME, MLflowTracker, get_git_commit
 from src.utils.logger import get_logger
 
 logger = get_logger("modelium.train")
@@ -63,6 +64,38 @@ def main():
     params = load_params()
     data_params, tuning_params = params["data"], params["tuning"]
     random_state = int(data_params["random_state"])
+
+    # Tracking wraps the run but never gates it: with mlflow.enabled=false every call
+    # below is a no-op and training proceeds unchanged.
+    tracker = MLflowTracker.from_params(params)
+    with tracker.start_run(run_name=f"train-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"):
+        _run_training(params, data_params, tuning_params, random_state, tracker)
+
+
+def _run_training(params, data_params, tuning_params, random_state, tracker):
+    tracker.set_tags({
+        "project_name": PROJECT_NAME,
+        "dvc_stage": "train",
+        "primary_metric": PRIMARY_METRIC,
+        "threshold_strategy": params["threshold"]["strategy"],
+        **get_git_commit(),
+    })
+    tracker.log_params({
+        "random_state": random_state,
+        "validation_size": data_params["validation_size"],
+        "test_size": data_params["test_size"],
+        "cv_folds": tuning_params["cv_folds"],
+        "n_iter": tuning_params["n_iter"],
+        "scoring": tuning_params["scoring"],
+        "search_n_jobs": tuning_params["search_n_jobs"],
+        "estimator_n_jobs": tuning_params["estimator_n_jobs"],
+        "threshold_strategy": params["threshold"]["strategy"],
+        "primary_metric": PRIMARY_METRIC,
+        "iqr_factor": params["preprocessing"]["iqr_factor"],
+        "min_average_precision": params["selection"]["min_average_precision"],
+        "min_roc_auc": params["selection"]["min_roc_auc"],
+        "min_recall": params["threshold"]["min_recall"],
+    })
 
     # Features come from the prepare stage. Validation and aggregation already ran in
     # their own DVC stages, so this script starts where the modelling starts.
@@ -89,6 +122,11 @@ def main():
     # portion only. Fitting once on all of X_train and searching over the transformed
     # matrix would let each fold's held-out rows shape their own transformation.
     scale_pos_weight = float((y_train == 0).sum() / (y_train == 1).sum())
+    tracker.log_params({
+        "train_rows": len(X_train), "validation_rows": len(X_val),
+        "test_rows": len(X_test), "n_raw_features": X.shape[1],
+        "scale_pos_weight": round(scale_pos_weight, 4),
+    })
 
     # ------------------------------------------------------- TRAIN: baseline + tuning
     # Both the baseline fit and every CV fold of the search live inside X_train.
@@ -124,6 +162,24 @@ def main():
         for failure in champion.gate_failures:
             print(f"  - {failure}")
 
+    # One nested run per candidate: tuned hyperparameters and CV score alongside the
+    # validation metrics that actually decided the champion. Logged after selection so
+    # each candidate can carry an is_champion tag; MLflow records the decision, it does
+    # not make it.
+    cv_scores = {s["Model"]: s for s in summarize_tuning(searches)}
+    for result in results:
+        name = result["Model"]
+        with tracker.child_run(name, tags={"is_champion": str(name == best_name).lower()}):
+            summary = cv_scores.get(name)
+            if summary:
+                tracker.log_params(summary["best_params"])
+                tracker.log_metrics({"cv_average_precision": summary["cv_best_score"]})
+                tracker.log_params({"cv_folds": summary["cv_folds"],
+                                    "cv_scoring": summary["cv_scoring"]})
+            else:
+                tracker.log_params({"tuned": False, "role": "baseline"})
+            tracker.log_metrics(result, prefix="val_")
+
     # Threshold is tuned on validation probabilities, then frozen.
     val_probs = get_probability_scores(best_model, X_val)
     threshold_info = find_f1_optimal_threshold(y_val, val_probs)
@@ -136,6 +192,15 @@ def main():
         f"recall={threshold_info['recall']:.4f})"
     )
 
+    tracker.set_tags({"champion_model": best_name})
+    tracker.log_params({"champion_model": best_name,
+                        "frozen_threshold": frozen_threshold})
+    tracker.log_metrics({
+        "champion_validation_average_precision": champion.metrics[PRIMARY_METRIC],
+        "champion_validation_roc_auc": champion.metrics["ROC-AUC"],
+        "frozen_threshold": frozen_threshold,
+    })
+
     # Operational gates run only now: Recall/Precision/F1 are threshold-dependent, so
     # before this point they describe the arbitrary 0.5 default rather than the cut-off
     # this pipeline will actually ship with.
@@ -147,6 +212,14 @@ def main():
         for failure in operational_failures:
             print(f"  - {failure}")
 
+    # Threshold-dependent metrics, recorded only now that a cut-off exists.
+    tracker.log_metrics(val_metrics_at_threshold, prefix="val_at_threshold_")
+    tracker.set_tags({
+        "promoted": str(bool(champion.promoted and operational_passed)).lower(),
+        "pre_threshold_gate_failures": "; ".join(champion.gate_failures) or "none",
+        "operational_gate_failures": "; ".join(operational_failures) or "none",
+    })
+
     # -------------------------------------------------- FINAL TEST EVALUATION
     # First and only read of the test split. Everything above is frozen.
     test_probs = get_probability_scores(best_model, X_test)
@@ -154,6 +227,9 @@ def main():
     print("\nFinal test evaluation (test set touched exactly once)")
     for key, value in test_metrics.items():
         print(f"  {key:<10} {value:.4f}" if isinstance(value, float) else f"  {key:<10} {value}")
+
+    # Recorded for the run history only; nothing downstream reads these back.
+    tracker.log_metrics(test_metrics, prefix="test_")
 
     # best_model IS the full preprocessing+model pipeline; this is the same fitted
     # transformer, extracted so its feature names can be recorded in metadata.
@@ -211,6 +287,21 @@ def main():
     with open(METRICS_DIR / "test_metrics.json", "w", encoding="utf-8") as handle:
         json.dump({k: v for k, v in test_metrics.items()
                    if isinstance(v, (int, float))}, handle, indent=2)
+
+    # Attach the artifacts this run produced, last, so a tracking failure cannot cost a
+    # completed model. These are copies for the run history — DVC and the paths above
+    # remain authoritative for what the application actually serves.
+    tracker.log_artifacts([
+        METRICS_DIR / "validation_leaderboard.csv",
+        METRICS_DIR / "tuning_summary.csv",
+        METRICS_DIR / "test_metrics.csv",
+        METRICS_DIR / "test_metrics.json",
+        ARTIFACT_DIR / "deployment_meta.json",
+    ], artifact_path="metrics")
+    tracker.log_artifact(MODEL_DIR / CHAMPION_PIPELINE_FILENAME, artifact_path="model")
+    if tracker.degraded:
+        print("\nWARNING: MLflow tracking degraded — the run record is incomplete. "
+              "The model and its metrics on disk are unaffected.")
 
 
 if __name__ == "__main__":

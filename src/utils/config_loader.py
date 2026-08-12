@@ -31,9 +31,18 @@ logger = get_logger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PARAMS_FILE = PROJECT_ROOT / "params.yaml"
 
-REQUIRED_SECTIONS: tuple[str, ...] = (
+# Sections that change what the model *is*. The DVC train stage declares exactly these,
+# so editing any of them invalidates training.
+MODEL_SECTIONS: tuple[str, ...] = (
     "data", "preprocessing", "tuning", "selection", "threshold", "models",
 )
+
+# Observability only. Deliberately excluded from the DVC train stage's params: renaming
+# an MLflow experiment or switching tracking off must not invalidate a 4-hour run, since
+# it changes nothing about the resulting model.
+TRACKING_SECTIONS: tuple[str, ...] = ("mlflow",)
+
+REQUIRED_SECTIONS: tuple[str, ...] = MODEL_SECTIONS + TRACKING_SECTIONS
 
 # Search spaces must exist for exactly the three tunable models, keyed as in
 # src/models/tune.py. A typo'd section would otherwise silently tune nothing.
@@ -201,6 +210,22 @@ def validate_params(params: dict) -> dict:
             f"{sorted(VALID_THRESHOLD_STRATEGIES)}, got {strategy!r}"
         )
     _require_fraction(threshold, "min_recall", "threshold")
+
+    # --- mlflow -----------------------------------------------------------------
+    tracking = params["mlflow"]
+    enabled = _require(tracking, "enabled", "mlflow")
+    if not isinstance(enabled, bool):
+        raise ConfigurationError(
+            f"params.yaml: 'mlflow.enabled' must be a boolean, got "
+            f"{type(enabled).__name__} ({enabled!r}); the string \"false\" is truthy "
+            f"and would switch tracking on"
+        )
+    for key in ("experiment_name", "tracking_uri"):
+        value = _require(tracking, key, "mlflow")
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(
+                f"params.yaml: 'mlflow.{key}' must be a non-empty string, got {value!r}"
+            )
 
     # --- models -----------------------------------------------------------------
     models = params["models"]

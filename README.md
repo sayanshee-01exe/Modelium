@@ -216,6 +216,37 @@ dvc repro predict
 | `dvc.yaml` | Stage definitions: commands, dependencies, outputs, metrics |
 | `dvc.lock` | Record of what was actually reproduced, and from which inputs |
 
+### Experiment tracking
+
+DVC and MLflow answer different questions, and the project keeps both:
+
+| | Question it answers |
+| --- | --- |
+| **DVC** | Can this run be reproduced? (data, stage graph, cached outputs) |
+| **MLflow** | What happened in this run? (params, metrics, artifacts, comparisons) |
+
+Training records one parent run per execution, with a nested run per candidate model
+carrying its tuned hyperparameters, CV score and validation metrics. The parent holds
+the run configuration, the champion, the frozen threshold, post-threshold validation
+metrics, final test metrics, the promotion decision, and the git commit the run came
+from. Metrics artifacts and the champion pipeline are attached to the run.
+
+Browse the runs locally:
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
+Then open <http://127.0.0.1:5000>.
+
+Tracking is configured under `mlflow:` in `params.yaml` and can be switched off with
+`enabled: false`, in which case training runs exactly as before and records nothing —
+it is never a prerequisite for producing a model. Run metadata lives in a local SQLite
+database (MLflow 3 retired the plain `./mlruns` file store) and artifacts in
+`mlartifacts/`; both are gitignored. That section is deliberately **not** among the
+params DVC tracks for the train stage, so renaming an experiment does not invalidate a
+multi-hour run.
+
 ### params.yaml
 
 `params.yaml` is the single source of truth for experiment configuration — split sizes, seed, IQR
@@ -249,6 +280,7 @@ modelium/
 │   ├── features/                 # domain features, preprocessing
 │   ├── models/                   # training, tuning, evaluation, selection, threshold, serialization
 │   ├── inference/                # Predictor
+│   ├── tracking/                 # MLflow experiment tracking
 │   ├── explainability/           # SHAP scaffolding (not wired into the pipeline)
 │   ├── monitoring/               # drift / fairness scaffolding (not wired in)
 │   ├── visualization/
@@ -278,10 +310,11 @@ modelium/
 - Threshold optimization on validation
 - Reproducible DVC pipeline with `params.yaml`
 - Batch inference with promotion safety
+- MLflow experiment tracking (local)
 
 **Not yet implemented**
 
-- MLflow experiment tracking
+- MLflow Model Registry and remote tracking server
 - SHAP explainability reporting
 - Model monitoring (drift, fairness)
 - FastAPI serving

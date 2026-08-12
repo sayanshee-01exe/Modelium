@@ -46,6 +46,19 @@ selection:
   min_average_precision: 0.15
   min_roc_auc: 0.65
 
+# Experiment tracking. Observability only — it changes nothing about the model, and is
+# deliberately NOT among the params.yaml sections the DVC train stage depends on, so
+# renaming an experiment or switching tracking off does not invalidate a 4-hour run.
+# Set enabled: false to train without recording anything.
+mlflow:
+  enabled: true
+  experiment_name: modelium-credit-risk
+  # Local SQLite store. MLflow 3 puts the plain "./mlruns" filesystem backend in
+  # maintenance mode and refuses it by default, so the run metadata lives in a local
+  # database and the artifacts in ./mlartifacts. Still entirely local — no server.
+  # The relative path is anchored to the repo root, not the working directory.
+  tracking_uri: sqlite:///mlflow.db
+
 threshold:
   # Tuned on the validation split only, then frozen before test is ever read.
   strategy: f1

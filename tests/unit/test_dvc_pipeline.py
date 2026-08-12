@@ -121,10 +121,24 @@ def test_validate_stage_does_not_train(stages) -> None:
 # ------------------------------------------------------------------------- params
 
 def test_train_declares_the_params_sections_it_reads(stages) -> None:
-    """Missing a section here means editing it would NOT re-run training."""
-    from src.utils.config_loader import REQUIRED_SECTIONS
+    """Exactly the model-behaviour sections.
 
-    assert set(stages["train"].get("params", [])) == set(REQUIRED_SECTIONS)
+    Missing one means editing it would NOT re-run training. Including a section that
+    does not change the model — `mlflow` — means renaming an experiment or switching
+    tracking off would invalidate a multi-hour run for no reason.
+    """
+    from src.utils.config_loader import MODEL_SECTIONS
+
+    assert set(stages["train"].get("params", [])) == set(MODEL_SECTIONS)
+
+
+def test_no_stage_depends_on_tracking_configuration(stages) -> None:
+    """Observability config must never invalidate a pipeline stage."""
+    from src.utils.config_loader import TRACKING_SECTIONS
+
+    for name, stage in stages.items():
+        assert set(TRACKING_SECTIONS).isdisjoint(stage.get("params", [])), \
+            f"{name} would re-run when tracking config changes"
 
 
 def test_parameter_free_stages_declare_no_params(stages) -> None:

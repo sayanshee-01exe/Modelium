@@ -1,0 +1,84 @@
+schema: '2.0'
+stages:
+  validate:
+    cmd: python scripts/validate_data.py
+    deps:
+    - path: config/config.py
+      hash: md5
+      md5: b2aef7f898604af96653c9ea0c2bc492
+      size: 2393
+    - path: data/raw
+      hash: md5
+      md5: d162fbc344236fe82a668e9ae8b93eb0.dir
+      size: 2683688032
+      nfiles: 8
+    - path: scripts/validate_data.py
+      hash: md5
+      md5: f687608481bd8c33cbda99bc6f27066d
+      size: 2142
+    - path: src/data/data_loader.py
+      hash: md5
+      md5: 62cfbc0c935f05390d4ae74369b5db70
+      size: 1467
+    - path: src/data/data_validation.py
+      hash: md5
+      md5: ad40b55b7801db31ff2774a7cddfe98d
+      size: 11174
+    outs:
+    - path: artifacts/metrics/raw_data_validation.json
+      hash: md5
+      md5: c97c1a1a5de847e0566b567c3552fca9
+      size: 705
+  prepare:
+    cmd: python scripts/prepare_data.py
+    deps:
+    - path: artifacts/metrics/raw_data_validation.json
+      hash: md5
+      md5: c97c1a1a5de847e0566b567c3552fca9
+      size: 705
+    - path: config/config.py
+      hash: md5
+      md5: b2aef7f898604af96653c9ea0c2bc492
+      size: 2393
+    - path: data/raw
+      hash: md5
+      md5: d162fbc344236fe82a668e9ae8b93eb0.dir
+      size: 2683688032
+      nfiles: 8
+    - path: scripts/prepare_data.py
+      hash: md5
+      md5: feb98bd1f6a6daa5223deaa5f12fc9a0
+      size: 4736
+    - path: src/data/data_cleaning.py
+      hash: md5
+      md5: 79570bd3343600bf4ca2f21078283c10
+      size: 2210
+    - path: src/data/data_loader.py
+      hash: md5
+      md5: 62cfbc0c935f05390d4ae74369b5db70
+      size: 1467
+    - path: src/data/data_preparation.py
+      hash: md5
+      md5: 39f461d1ca860f709b0b53a9ae2bd387
+      size: 6141
+    - path: src/data/data_validation.py
+      hash: md5
+      md5: ad40b55b7801db31ff2774a7cddfe98d
+      size: 11174
+    - path: src/features/feature_engineering.py
+      hash: md5
+      md5: 34ffff50c07624ce56877063a4b2f916
+      size: 2628
+    outs:
+    - path: data/processed/prepare_report.json
+      hash: md5
+      md5: 0e072204de2229387284f428e484b054
+      size: 1038
+    - path: data/processed/test_features.parquet
+      hash: md5
+      md5: 9df932fb569661ab56ef6d82415e3e4c
+      size: 36310831
+    - path: data/processed/train_features.parquet
+      hash: md5
+      md5: 429115c8d86a0acf3d7a0e50d56360ec
+      size: 160407326

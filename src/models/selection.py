@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from src.models.evaluation import PRIMARY_METRIC
+from src.utils.config_loader import get_section
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,27 +37,21 @@ SECONDARY_METRICS = ("ROC-AUC", "Recall", "Precision", "F1", "Accuracy")
 # default it will never actually ship with.
 THRESHOLD_DEPENDENT_METRICS = frozenset({"Recall", "Precision", "F1", "Accuracy"})
 
-# Pre-threshold promotion floors — threshold-independent metrics only. Justification,
-# given a ~8% default rate on Home Credit:
-#   Average Precision 0.15 — a random classifier scores ~0.08 (the positive rate), so
-#                            this is roughly 2x random. Published solutions reach
-#                            ~0.25-0.30.
-#   ROC-AUC           0.65 — random is 0.50; the prior single-table champion on this
-#                            dataset reached 0.7692, so 0.65 sits clearly below
-#                            known-achievable while still rejecting a model that has
-#                            learned nothing.
-# Conservative on purpose: these catch a broken pipeline, they do not encode a business
-# risk appetite, which nobody has specified. Override per call.
+# Pre-threshold promotion floors — threshold-independent metrics only. Values come from
+# params.yaml (`selection:`), which carries the justification: they are conservative
+# floors that catch a broken pipeline, not a business risk appetite, which nobody has
+# specified. Override per call.
+_SELECTION = get_section("selection")
 DEFAULT_QUALITY_GATES: dict[str, float] = {
-    PRIMARY_METRIC: 0.15,
-    "ROC-AUC": 0.65,
+    PRIMARY_METRIC: float(_SELECTION["min_average_precision"]),
+    "ROC-AUC": float(_SELECTION["min_roc_auc"]),
 }
 
 # Post-threshold operational floor, applied to metrics recomputed at the frozen
 # threshold. Missing more than 60% of defaulters makes the model commercially
 # pointless regardless of how good its ranking metrics look.
 DEFAULT_OPERATIONAL_GATES: dict[str, float] = {
-    "Recall": 0.40,
+    "Recall": float(get_section("threshold")["min_recall"]),
 }
 
 

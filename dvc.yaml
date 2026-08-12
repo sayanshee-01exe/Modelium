@@ -1,0 +1,102 @@
+# Reproducible pipeline: validate -> prepare -> train -> predict
+#
+# Each stage declares what it reads and what it writes, so `dvc repro` re-runs exactly
+# the stages a change can affect and no others. The split between `prepare` and `train`
+# is the one that earns its keep: aggregation is expensive and reads no parameters, so
+# editing a search space re-runs the search alone rather than re-aggregating ~57 M
+# child rows.
+#
+# `params:` lists the params.yaml sections a stage depends on. A stage with no `params:`
+# entry genuinely reads none — that is a claim about the code, not an omission.
+
+stages:
+
+  # Raw data contract. Nothing is cleaned, transformed or trained here, so a broken
+  # input fails in its own stage naming the table and the offending values.
+  validate:
+    cmd: python scripts/validate_data.py
+    deps:
+      - scripts/validate_data.py
+      - src/data/data_validation.py
+      - src/data/data_loader.py
+      - config/config.py
+      - data/raw
+    outs:
+      - artifacts/metrics/raw_data_validation.json:
+          cache: false
+
+  # Relational aggregation + domain features for both the training and scoring
+  # applicant tables, built by the same functions with only the applicant table
+  # switched. Depends on the validation report so the contract is checked first.
+  prepare:
+    cmd: python scripts/prepare_data.py
+    deps:
+      - scripts/prepare_data.py
+      - src/data/data_preparation.py
+      - src/data/data_cleaning.py
+      - src/data/data_loader.py
+      - src/data/data_validation.py
+      - src/features/feature_engineering.py
+      - config/config.py
+      - data/raw
+      - artifacts/metrics/raw_data_validation.json
+    outs:
+      - data/processed/train_features.parquet
+      - data/processed/test_features.parquet
+      - data/processed/prepare_report.json:
+          cache: false
+
+  # Split -> baseline + leak-free CV tuning -> validation champion -> frozen threshold
+  # -> single test read -> serialized champion pipeline.
+  train:
+    cmd: python scripts/train.py
+    deps:
+      - scripts/train.py
+      - src/models/train.py
+      - src/models/tune.py
+      - src/models/selection.py
+      - src/models/evaluation.py
+      - src/models/threshold.py
+      - src/models/serialization.py
+      - src/features/data_preprocessing.py
+      - src/data/data_preparation.py
+      - src/utils/config_loader.py
+      - config/config.py
+      - data/processed/train_features.parquet
+      - data/processed/prepare_report.json
+    params:
+      - data
+      - preprocessing
+      - tuning
+      - selection
+      - threshold
+      - models
+    outs:
+      - models/champion_pipeline.joblib
+      - artifacts/deployment_meta.json
+      - artifacts/metrics/validation_leaderboard.csv:
+          cache: false
+      - artifacts/metrics/tuning_summary.csv:
+          cache: false
+      - artifacts/metrics/test_metrics.csv:
+          cache: false
+    metrics:
+      - artifacts/metrics/test_metrics.json:
+          cache: false
+
+  # Scores the prepared application_test features with the frozen champion. No training,
+  # no refitting, no threshold retuning — it depends on the champion artifact and its
+  # metadata, so it re-runs when either changes.
+  predict:
+    cmd: python scripts/predict.py
+    deps:
+      - scripts/predict.py
+      - src/inference/predictor.py
+      - src/features/data_preprocessing.py
+      - src/models/serialization.py
+      - config/config.py
+      - models/champion_pipeline.joblib
+      - artifacts/deployment_meta.json
+      - data/processed/test_features.parquet
+    outs:
+      - artifacts/predictions/test_predictions.csv

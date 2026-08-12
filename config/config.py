@@ -1,23 +1,39 @@
+"""Structural constants only — paths, filenames, and the two column names the schema
+is built around.
+
+Everything an *experiment* would change (split sizes, seeds, search spaces, gate
+thresholds) lives in `params.yaml` and is read through `src/utils/config_loader.py`.
+Splitting it this way gives DVC something meaningful to hash: editing a search space
+invalidates the stages that read it, while moving a directory does not pretend to be a
+new experiment.
+
+`RANDOM_STATE`, `VALIDATION_SIZE` and `TEST_SIZE` used to live here and now come from
+params.yaml. `HIGH_MISSING_THRESHOLD`, `LOW_CARDINALITY_THRESHOLD` and
+`DOWNSAMPLE_RATIO` were also defined here and were read by nothing; they were removed
+rather than migrated, since a parameter no code consults is a claim the pipeline does
+not honour.
+"""
+
 from pathlib import Path
 
-RANDOM_STATE = 42
 TARGET_COL = "TARGET"
 ID_COL = "SK_ID_CURR"
-HIGH_MISSING_THRESHOLD = 60.0
-LOW_CARDINALITY_THRESHOLD = 10
-DOWNSAMPLE_RATIO = 0.10
-
-# Three-way split sizes, as fractions of the full dataset (Step 1).
-# Step 7 of the refactor plan moves these into params.yaml; they live here for now so
-# Step 1 does not depend on a file that does not exist yet.
-VALIDATION_SIZE = 0.15
-TEST_SIZE = 0.15
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 ARTIFACT_DIR = PROJECT_ROOT / "artifacts"
+METRICS_DIR = ARTIFACT_DIR / "metrics"
+PREDICTIONS_DIR = ARTIFACT_DIR / "predictions"
 MODEL_DIR = PROJECT_ROOT / "models"
 REPORT_DIR = PROJECT_ROOT / "reports"
+
+# DVC stage artifacts. Named here so dvc.yaml, the producing script and the consuming
+# script cannot drift on a path.
+TRAIN_FEATURES_FILE = PROCESSED_DIR / "train_features.parquet"
+TEST_FEATURES_FILE = PROCESSED_DIR / "test_features.parquet"
+PREPARE_REPORT_FILE = PROCESSED_DIR / "prepare_report.json"
+VALIDATION_REPORT_FILE = METRICS_DIR / "raw_data_validation.json"
 
 # Registry of every raw table on disk. Task 5 reworks the loader to pull subsets per
 # stage rather than reading all of these at once (defect D1), so listing a file here
@@ -35,8 +51,3 @@ DATA_FILES = {
     "credit_card": "credit_card_balance.csv",
     "installments": "installments_payments.csv",
 }
-
-# Step 4 randomised-search budget. n_iter x cv_folds fits per tuned model, so 20x3 = 60.
-# Kept modest so a full run stays feasible on a laptop; raise for a serious sweep.
-TUNING_N_ITER = 20
-TUNING_CV_FOLDS = 3

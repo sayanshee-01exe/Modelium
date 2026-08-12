@@ -1,0 +1,85 @@
+# Experiment parameters — the single source of truth for every value an experiment
+# might change. Python keeps only true constants (paths, filenames, the target and ID
+# column names); anything you would tune, sweep, or compare across runs lives here.
+#
+# DVC hashes this file per stage, so editing a value below invalidates exactly the
+# stages that read it and `dvc repro` re-runs only those.
+#
+# Every value here is the one the code already used before this file existed. Nothing
+# was retuned to populate it.
+
+data:
+  # Fractions of the ORIGINAL frame, not of what survives the previous split.
+  validation_size: 0.15
+  test_size: 0.15
+  # Seed for the splits, the search sampler, and every estimator — one seed so a rerun
+  # reproduces a run exactly.
+  random_state: 42
+
+preprocessing:
+  # Tukey fence multiplier for IQRClipper: bounds are [Q1 - f*IQR, Q3 + f*IQR],
+  # learned on the training fold only.
+  iqr_factor: 1.5
+
+tuning:
+  # n_iter x cv_folds fits per model, and every fit refits the preprocessor inside its
+  # fold. 20 x 3 = 60 per model is the practical laptop ceiling.
+  n_iter: 20
+  cv_folds: 3
+  # Must match selection.primary_metric, or the model that wins the search is not the
+  # model that wins selection. config_loader enforces the pairing.
+  scoring: average_precision
+  # One parallelism layer only: the search fans out across candidates, so each
+  # estimator stays single-threaded. Both at -1 oversubscribes the machine.
+  search_n_jobs: -1
+  estimator_n_jobs: 1
+
+selection:
+  primary_metric: Average Precision
+  # Pre-threshold promotion floors. Threshold-INDEPENDENT metrics only — Recall,
+  # Precision and F1 mean nothing until the decision threshold is frozen.
+  # At an ~8% default rate a random classifier scores AP ~0.08 and ROC-AUC 0.50; the
+  # prior single-table champion reached ROC-AUC 0.7692. These catch a broken pipeline,
+  # they do not encode a business risk appetite.
+  min_average_precision: 0.15
+  min_roc_auc: 0.65
+
+threshold:
+  # Tuned on the validation split only, then frozen before test is ever read.
+  strategy: f1
+  # Post-threshold operational floor, applied once the cut-off is frozen. Missing more
+  # than 60% of defaulters makes the model commercially pointless.
+  min_recall: 0.40
+
+# Randomised-search spaces. Keys are bare estimator parameter names; the `model__`
+# prefix needed to address them inside the Pipeline is added in src/models/tune.py, so
+# this file stays readable and the prefix cannot be forgotten in one place only.
+models:
+  random_forest:
+    n_estimators: [200, 300, 400, 600]
+    max_depth: [6, 8, 10, 12, 16]
+    min_samples_split: [2, 10, 25, 50]
+    min_samples_leaf: [10, 25, 50, 100]
+    max_features: [sqrt, log2, 0.3]
+
+  xgboost:
+    n_estimators: [200, 300, 500, 800]
+    learning_rate: [0.01, 0.03, 0.05, 0.1]
+    max_depth: [3, 4, 5, 6, 8]
+    min_child_weight: [1, 5, 10, 25]
+    subsample: [0.6, 0.7, 0.8, 0.9]
+    colsample_bytree: [0.6, 0.7, 0.8, 0.9]
+    gamma: [0.0, 0.1, 0.5, 1.0]
+    reg_alpha: [0.0, 0.1, 1.0, 5.0]
+    reg_lambda: [0.5, 1.0, 5.0, 10.0]
+
+  lightgbm:
+    n_estimators: [300, 500, 800, 1200]
+    learning_rate: [0.01, 0.03, 0.05, 0.1]
+    num_leaves: [15, 31, 63, 127]
+    max_depth: [-1, 5, 7, 9]
+    min_child_samples: [10, 25, 50, 100]
+    subsample: [0.6, 0.7, 0.8, 0.9]
+    colsample_bytree: [0.6, 0.7, 0.8, 0.9]
+    reg_alpha: [0.0, 0.1, 1.0, 5.0]
+    reg_lambda: [0.5, 1.0, 5.0, 10.0]

@@ -19,6 +19,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
+from src.utils.config_loader import get_section
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -85,11 +86,17 @@ class IQRClipper(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         return clipped
 
 
-def build_preprocessor(X_train: pd.DataFrame) -> ColumnTransformer:
+def build_preprocessor(X_train: pd.DataFrame, iqr_factor: float | None = None) -> ColumnTransformer:
     """Build the (unfitted) preprocessor from the training frame's column layout.
 
     Only the *column names and dtypes* of `X_train` are read here — no statistic is
     learned until `.fit()` is called by the caller on the training split.
+
+    Args:
+        X_train: Training frame, read for its column layout only.
+        iqr_factor: Tukey fence multiplier for `IQRClipper`. Defaults to
+            `preprocessing.iqr_factor` in params.yaml, so the value is configurable in
+            one place without threading it through every caller that builds a pipeline.
 
     Dense vs sparse output (measured, not assumed):
       - All 8 candidate models accept a sparse matrix.
@@ -101,12 +108,14 @@ def build_preprocessor(X_train: pd.DataFrame) -> ColumnTransformer:
       Sparse output would therefore cost compatibility without saving memory. Dense
       output measures ~0.98 GB for the 246k-row training split, which is acceptable.
     """
+    factor = get_section("preprocessing")["iqr_factor"] if iqr_factor is None else iqr_factor
+
     numeric = X_train.select_dtypes(include=np.number).columns.tolist()
     categorical = X_train.select_dtypes(exclude=np.number).columns.tolist()
 
     numeric_pipe = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("iqr_clipper", IQRClipper()),
+        ("iqr_clipper", IQRClipper(factor=factor)),
         ("scaler", StandardScaler()),
     ])
     categorical_pipe = Pipeline([

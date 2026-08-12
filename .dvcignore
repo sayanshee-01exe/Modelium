@@ -1,3 +1,18 @@
-# Add patterns of files dvc should ignore, which could improve
-# the performance. Learn more at
+# Paths DVC never needs to hash. Keeping them out speeds up every `dvc status` and
+# `dvc repro`, because `data/raw` is declared as a stage dependency and DVC walks the
+# tree to hash it.
+#
+# Nothing the pipeline reads or writes is listed here: data/, src/, scripts/, config/,
+# params.yaml, models/ and artifacts/ are all left visible to DVC on purpose.
 # https://dvc.org/doc/user-guide/dvcignore
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+logs/
+mlruns/
+mlartifacts/
+.DS_Store

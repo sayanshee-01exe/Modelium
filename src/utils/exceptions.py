@@ -15,6 +15,14 @@ class ModeliumError(Exception):
     """
 
 
+class ConfigurationError(ModeliumError):
+    """Raised when `params.yaml` is absent, malformed, or holds an unusable value.
+
+    Caught at load rather than at use: a `cv_folds: 1` surfaces here in milliseconds
+    naming the field, instead of minutes into a run as an opaque split error.
+    """
+
+
 class DataValidationError(ModeliumError):
     """Raised when raw or intermediate data violates its expected contract.
 

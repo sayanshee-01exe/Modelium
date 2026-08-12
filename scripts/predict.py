@@ -1,21 +1,21 @@
-"""Batch inference entry point.
+"""DVC stage 4 — batch inference entry point.
 
-Flow: validate files -> load inference tables -> validate tables -> aggregate ->
-domain features -> align to the training schema -> champion pipeline -> CSV.
+Flow: read prepared scoring features -> align to the training schema -> champion
+pipeline -> CSV.
 
-Orchestration only. Every step below is a call into `src/`, and the feature-building
-calls are the *same functions* `scripts/train.py` uses — `build_relational_feature_table`
-and `add_domain_features` — with the applicant table switched to application_test. A
-second implementation for inference is how training/serving skew starts.
+Orchestration only. The scoring features were built by the `prepare` stage using the
+*same two functions* that built the training features — `build_relational_feature_table`
+and `add_domain_features` — with only the applicant table switched to application_test.
+A second implementation for inference is how training/serving skew starts.
 
 Nothing here trains, fits, or tunes. Preprocessing is transform-only inside the loaded
 champion pipeline, and the decision threshold comes from metadata, frozen on validation
 in Step 4.
 
-`drop_low_information_columns` is deliberately **not** called: it is a training-time
-decision, and recomputing it from application_test would let the batch being scored
-determine the production feature schema. The Predictor aligns to the schema the
-pipeline was actually fitted on instead.
+`drop_low_information_columns` is deliberately never applied to the scoring table: it is
+a training-time decision, and recomputing it from application_test would let the batch
+being scored determine the production feature schema. The Predictor aligns to the schema
+the pipeline was actually fitted on instead.
 """
 
 from __future__ import annotations
@@ -27,19 +27,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.config import DATA_DIR, DATA_FILES, MODEL_DIR, ARTIFACT_DIR
-from src.data.data_loader import load_home_credit_tables
-from src.data.data_validation import INFERENCE_TABLES, validate_inference_tables, validate_raw_files
-from src.data.data_cleaning import optimize_memory
-from src.data.data_preparation import build_relational_feature_table
-from src.features.feature_engineering import add_domain_features
+import pandas as pd
+
+from config.config import ARTIFACT_DIR, MODEL_DIR, PREDICTIONS_DIR, TEST_FEATURES_FILE
 from src.inference.predictor import Predictor
 from src.utils.logger import get_logger
 
 logger = get_logger("modelium.predict")
 
-APPLICATION_TABLE = "application_test"
-PREDICTIONS_DIR = ARTIFACT_DIR / "predictions"
 PREDICTIONS_FILENAME = "test_predictions.csv"
 
 
@@ -58,27 +53,7 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
 
-    # Only the tables inference actually needs. application_train is excluded: scoring
-    # must not depend on the training applicants, and loading them would cost a 158 MB
-    # read for nothing.
-    inference_files = {name: DATA_FILES[name] for name in INFERENCE_TABLES}
-
-    # File existence is table-agnostic, so the training checker is reused as-is against
-    # the narrower inference file map rather than reimplemented.
-    logger.info("Validating inference dataset files...")
-    validate_raw_files(DATA_DIR, inference_files)
-
-    tables = load_home_credit_tables(DATA_DIR, inference_files)
-
-    logger.info("Validating loaded inference dataframes...")
-    validate_inference_tables(tables, application_table=APPLICATION_TABLE)
-
-    logger.info("Starting memory optimization...")
-    tables = {name: optimize_memory(df) for name, df in tables.items()}
-
-    # The same two functions training calls, in the same order.
-    df = build_relational_feature_table(tables, application_table=APPLICATION_TABLE)
-    df = add_domain_features(df)
+    df = pd.read_parquet(TEST_FEATURES_FILE)
     print(f"Inference feature table: {len(df):,} applicants x {df.shape[1]:,} columns")
 
     # Refuses an unpromoted or otherwise invalid artifact unless explicitly overridden.

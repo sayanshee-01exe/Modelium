@@ -33,6 +33,7 @@ from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 
 from src.features.data_preprocessing import build_preprocessor
+from src.utils.config_loader import get_section
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,44 +42,55 @@ TUNED_SUFFIX = " (Tuned)"
 PREPROCESSOR_STEP = "preprocessor"
 MODEL_STEP = "model"
 
-# Keys are prefixed with the pipeline step name so they resolve inside the Pipeline.
-# Budgets stay modest: n_iter x cv_folds fits per model is the practical laptop ceiling,
-# and each fit now also refits the preprocessor.
-SEARCH_SPACES: dict[str, dict[str, list[Any]]] = {
-    "Random Forest": {
-        f"{MODEL_STEP}__n_estimators": [200, 300, 400, 600],
-        f"{MODEL_STEP}__max_depth": [6, 8, 10, 12, 16],
-        f"{MODEL_STEP}__min_samples_split": [2, 10, 25, 50],
-        f"{MODEL_STEP}__min_samples_leaf": [10, 25, 50, 100],
-        f"{MODEL_STEP}__max_features": ["sqrt", "log2", 0.3],
-    },
-    "XGBoost": {
-        f"{MODEL_STEP}__n_estimators": [200, 300, 500, 800],
-        f"{MODEL_STEP}__learning_rate": [0.01, 0.03, 0.05, 0.1],
-        f"{MODEL_STEP}__max_depth": [3, 4, 5, 6, 8],
-        f"{MODEL_STEP}__min_child_weight": [1, 5, 10, 25],
-        f"{MODEL_STEP}__subsample": [0.6, 0.7, 0.8, 0.9],
-        f"{MODEL_STEP}__colsample_bytree": [0.6, 0.7, 0.8, 0.9],
-        f"{MODEL_STEP}__gamma": [0.0, 0.1, 0.5, 1.0],
-        f"{MODEL_STEP}__reg_alpha": [0.0, 0.1, 1.0, 5.0],
-        f"{MODEL_STEP}__reg_lambda": [0.5, 1.0, 5.0, 10.0],
-    },
-    "LightGBM": {
-        f"{MODEL_STEP}__n_estimators": [300, 500, 800, 1200],
-        f"{MODEL_STEP}__learning_rate": [0.01, 0.03, 0.05, 0.1],
-        f"{MODEL_STEP}__num_leaves": [15, 31, 63, 127],
-        f"{MODEL_STEP}__max_depth": [-1, 5, 7, 9],
-        f"{MODEL_STEP}__min_child_samples": [10, 25, 50, 100],
-        f"{MODEL_STEP}__subsample": [0.6, 0.7, 0.8, 0.9],
-        f"{MODEL_STEP}__colsample_bytree": [0.6, 0.7, 0.8, 0.9],
-        f"{MODEL_STEP}__reg_alpha": [0.0, 0.1, 1.0, 5.0],
-        f"{MODEL_STEP}__reg_lambda": [0.5, 1.0, 5.0, 10.0],
-    },
+# params.yaml keys -> the display names used throughout the pipeline. The YAML side
+# stays snake_case (conventional for config); the Python side keeps the names that
+# already appear in leaderboards, metadata and logs.
+PARAM_KEY_TO_MODEL: dict[str, str] = {
+    "random_forest": "Random Forest",
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
 }
 
 
-def build_tunable_models(random_state: int = 42, scale_pos_weight: float = 1.0,
-                         estimator_n_jobs: int = 1) -> dict:
+def build_search_spaces(models_params: dict[str, dict[str, list[Any]]] | None = None
+                        ) -> dict[str, dict[str, list[Any]]]:
+    """Translate the `models:` section of params.yaml into sklearn search spaces.
+
+    The `model__` prefix is applied here rather than written into the YAML, so the file
+    stays readable and the prefix cannot be forgotten for one parameter out of thirty.
+    Inside a Pipeline a bare `n_estimators` addresses nothing and sklearn raises.
+
+    Args:
+        models_params: The `models:` mapping; read from params.yaml when omitted.
+
+    Returns:
+        ``{"Random Forest": {"model__n_estimators": [...], ...}, ...}``
+    """
+    source = get_section("models") if models_params is None else models_params
+    return {
+        display: {f"{MODEL_STEP}__{param}": list(values)
+                  for param, values in source[key].items()}
+        for key, display in PARAM_KEY_TO_MODEL.items()
+    }
+
+
+# Module-level default so callers and tests keep a single obvious entry point. Budgets
+# stay modest: n_iter x cv_folds fits per model is the practical laptop ceiling, and
+# each fit also refits the preprocessor.
+SEARCH_SPACES: dict[str, dict[str, list[Any]]] = build_search_spaces()
+
+_TUNING = get_section("tuning")
+DEFAULT_N_ITER: int = _TUNING["n_iter"]
+DEFAULT_CV_FOLDS: int = _TUNING["cv_folds"]
+DEFAULT_SCORING: str = _TUNING["scoring"]
+DEFAULT_SEARCH_N_JOBS: int = _TUNING["search_n_jobs"]
+DEFAULT_ESTIMATOR_N_JOBS: int = _TUNING["estimator_n_jobs"]
+DEFAULT_RANDOM_STATE: int = get_section("data")["random_state"]
+
+
+def build_tunable_models(random_state: int = DEFAULT_RANDOM_STATE,
+                         scale_pos_weight: float = 1.0,
+                         estimator_n_jobs: int = DEFAULT_ESTIMATOR_N_JOBS) -> dict:
     """Return unfitted base estimators for the three tunable models.
 
     Imbalance is handled by the estimator rather than by resampling: `class_weight` for
@@ -134,11 +146,11 @@ def tune_model(
     X_train,
     y_train,
     *,
-    n_iter: int = 20,
-    cv_folds: int = 3,
-    scoring: str = "average_precision",
-    random_state: int = 42,
-    n_jobs: int = -1,
+    n_iter: int = DEFAULT_N_ITER,
+    cv_folds: int = DEFAULT_CV_FOLDS,
+    scoring: str = DEFAULT_SCORING,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    n_jobs: int = DEFAULT_SEARCH_N_JOBS,
     verbose: int = 0,
     preprocessor=None,
 ) -> RandomizedSearchCV:
@@ -195,12 +207,12 @@ def tune_candidates(
     y_train,
     *,
     models: Sequence[str] | None = None,
-    n_iter: int = 20,
-    cv_folds: int = 3,
-    scoring: str = "average_precision",
-    random_state: int = 42,
+    n_iter: int = DEFAULT_N_ITER,
+    cv_folds: int = DEFAULT_CV_FOLDS,
+    scoring: str = DEFAULT_SCORING,
+    random_state: int = DEFAULT_RANDOM_STATE,
     scale_pos_weight: float = 1.0,
-    n_jobs: int = -1,
+    n_jobs: int = DEFAULT_SEARCH_N_JOBS,
     preprocessor=None,
 ) -> dict[str, RandomizedSearchCV]:
     """Tune each requested model on the raw training split.

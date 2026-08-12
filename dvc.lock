@@ -82,3 +82,264 @@ stages:
       hash: md5
       md5: 429115c8d86a0acf3d7a0e50d56360ec
       size: 160407326
+  train:
+    cmd: python scripts/train.py
+    deps:
+    - path: config/config.py
+      hash: md5
+      md5: b2aef7f898604af96653c9ea0c2bc492
+      size: 2393
+    - path: data/processed/prepare_report.json
+      hash: md5
+      md5: 0e072204de2229387284f428e484b054
+      size: 1038
+    - path: data/processed/train_features.parquet
+      hash: md5
+      md5: 429115c8d86a0acf3d7a0e50d56360ec
+      size: 160407326
+    - path: scripts/train.py
+      hash: md5
+      md5: 03f6c21651a7a0fbd166e291c3362cb2
+      size: 10389
+    - path: src/data/data_preparation.py
+      hash: md5
+      md5: 39f461d1ca860f709b0b53a9ae2bd387
+      size: 6141
+    - path: src/features/data_preprocessing.py
+      hash: md5
+      md5: 5104d07cee7aa9e546bc81ba87465b87
+      size: 8477
+    - path: src/models/evaluation.py
+      hash: md5
+      md5: 0661d2e18d0e1caec8b4efcd9fd77483
+      size: 2931
+    - path: src/models/selection.py
+      hash: md5
+      md5: cd4174c93c2f47f808e94b8427ce81f8
+      size: 7550
+    - path: src/models/serialization.py
+      hash: md5
+      md5: 8cac24464e1a8bee41bf3375eb3c802e
+      size: 4540
+    - path: src/models/threshold.py
+      hash: md5
+      md5: 2387e144c9585db67ea055ce243a862b
+      size: 529
+    - path: src/models/train.py
+      hash: md5
+      md5: 01e4dc2e8907a8898580650a1b1cb81e
+      size: 4014
+    - path: src/models/tune.py
+      hash: md5
+      md5: 64039cbd566f9a63b69db84a0adb8628
+      size: 11431
+    - path: src/utils/config_loader.py
+      hash: md5
+      md5: 2b74d8173cf442b22aaa9ef16364828f
+      size: 10974
+    params:
+      params.yaml:
+        data:
+          validation_size: 0.15
+          test_size: 0.15
+          random_state: 42
+        models:
+          random_forest:
+            n_estimators:
+            - 200
+            - 300
+            - 400
+            - 600
+            max_depth:
+            - 6
+            - 8
+            - 10
+            - 12
+            - 16
+            min_samples_split:
+            - 2
+            - 10
+            - 25
+            - 50
+            min_samples_leaf:
+            - 10
+            - 25
+            - 50
+            - 100
+            max_features:
+            - sqrt
+            - log2
+            - 0.3
+          xgboost:
+            n_estimators:
+            - 200
+            - 300
+            - 500
+            - 800
+            learning_rate:
+            - 0.01
+            - 0.03
+            - 0.05
+            - 0.1
+            max_depth:
+            - 3
+            - 4
+            - 5
+            - 6
+            - 8
+            min_child_weight:
+            - 1
+            - 5
+            - 10
+            - 25
+            subsample:
+            - 0.6
+            - 0.7
+            - 0.8
+            - 0.9
+            colsample_bytree:
+            - 0.6
+            - 0.7
+            - 0.8
+            - 0.9
+            gamma:
+            - 0.0
+            - 0.1
+            - 0.5
+            - 1.0
+            reg_alpha:
+            - 0.0
+            - 0.1
+            - 1.0
+            - 5.0
+            reg_lambda:
+            - 0.5
+            - 1.0
+            - 5.0
+            - 10.0
+          lightgbm:
+            n_estimators:
+            - 300
+            - 500
+            - 800
+            - 1200
+            learning_rate:
+            - 0.01
+            - 0.03
+            - 0.05
+            - 0.1
+            num_leaves:
+            - 15
+            - 31
+            - 63
+            - 127
+            max_depth:
+            - -1
+            - 5
+            - 7
+            - 9
+            min_child_samples:
+            - 10
+            - 25
+            - 50
+            - 100
+            subsample:
+            - 0.6
+            - 0.7
+            - 0.8
+            - 0.9
+            colsample_bytree:
+            - 0.6
+            - 0.7
+            - 0.8
+            - 0.9
+            reg_alpha:
+            - 0.0
+            - 0.1
+            - 1.0
+            - 5.0
+            reg_lambda:
+            - 0.5
+            - 1.0
+            - 5.0
+            - 10.0
+        preprocessing:
+          iqr_factor: 1.5
+        selection:
+          primary_metric: Average Precision
+          min_average_precision: 0.15
+          min_roc_auc: 0.65
+        threshold:
+          strategy: f1
+          min_recall: 0.4
+        tuning:
+          n_iter: 20
+          cv_folds: 3
+          scoring: average_precision
+          search_n_jobs: 3
+          estimator_n_jobs: 1
+    outs:
+    - path: artifacts/deployment_meta.json
+      hash: md5
+      md5: f47f811b03f0d1ac9d9f8b98e644e837
+      size: 48546
+    - path: artifacts/metrics/test_metrics.csv
+      hash: md5
+      md5: 9ec8dfdb672e65dbd66706e275fcc752
+      size: 255
+    - path: artifacts/metrics/test_metrics.json
+      hash: md5
+      md5: 9c56fd7011455bb56dfc1a53511c3a64
+      size: 301
+    - path: artifacts/metrics/tuning_summary.csv
+      hash: md5
+      md5: 40b9a4dc4396866667f39edae46c1dab
+      size: 866
+    - path: artifacts/metrics/validation_leaderboard.csv
+      hash: md5
+      md5: b6f29285c01dd4c1b95a9f910a56f435
+      size: 593
+    - path: models/champion_pipeline.joblib
+      hash: md5
+      md5: c743c2bd0e818a14e1609fd2d38b20b4
+      size: 244959
+  predict:
+    cmd: python scripts/predict.py
+    deps:
+    - path: artifacts/deployment_meta.json
+      hash: md5
+      md5: f47f811b03f0d1ac9d9f8b98e644e837
+      size: 48546
+    - path: config/config.py
+      hash: md5
+      md5: b2aef7f898604af96653c9ea0c2bc492
+      size: 2393
+    - path: data/processed/test_features.parquet
+      hash: md5
+      md5: 9df932fb569661ab56ef6d82415e3e4c
+      size: 36310831
+    - path: models/champion_pipeline.joblib
+      hash: md5
+      md5: c743c2bd0e818a14e1609fd2d38b20b4
+      size: 244959
+    - path: scripts/predict.py
+      hash: md5
+      md5: b327f58ec9ee6dfa7492935c9251c50f
+      size: 3129
+    - path: src/features/data_preprocessing.py
+      hash: md5
+      md5: 5104d07cee7aa9e546bc81ba87465b87
+      size: 8477
+    - path: src/inference/predictor.py
+      hash: md5
+      md5: 37f81de7461e4793cfb747b20d5a010a
+      size: 19981
+    - path: src/models/serialization.py
+      hash: md5
+      md5: 8cac24464e1a8bee41bf3375eb3c802e
+      size: 4540
+    outs:
+    - path: artifacts/predictions/test_predictions.csv
+      hash: md5
+      md5: 11bc798219c35380e91266340d1b60bb
+      size: 1382680

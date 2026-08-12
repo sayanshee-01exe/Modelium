@@ -31,7 +31,9 @@ tuning:
   scoring: average_precision
   # One parallelism layer only: the search fans out across candidates, so each
   # estimator stays single-threaded. Both at -1 oversubscribes the machine.
-  search_n_jobs: -1
+  # Limited to 3 workers to avoid memory/swap pressure during dense CV preprocessing;
+  # raise on a machine with more RAM. Results are identical at any worker count.
+  search_n_jobs: 3
   estimator_n_jobs: 1
 
 selection:

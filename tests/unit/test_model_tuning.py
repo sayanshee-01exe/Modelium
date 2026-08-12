@@ -305,20 +305,29 @@ def test_tune_candidates_rejects_unknown_model(raw_xy) -> None:
 def test_tuned_estimators_do_not_self_parallelise() -> None:
     """One parallelism layer only.
 
-    RandomizedSearchCV fans out across candidates with n_jobs=-1. If each estimator
-    also grabbed every core, an 8-core box would run 8 workers x 8 threads = 64
-    threads contending for 8 cores, which is slower than either strategy alone.
+    RandomizedSearchCV fans out across candidates. If each estimator also grabbed every
+    core, the two layers would multiply into far more threads than the box has cores,
+    which is slower than either strategy alone.
     """
     for name, model in build_tunable_models(random_state=42).items():
         assert model.get_params()["n_jobs"] == 1, f"{name} would oversubscribe inside the search"
 
 
 def test_search_owns_the_parallelism(raw_xy) -> None:
+    """The search parallelises, not the estimators — whatever worker count params sets.
+
+    Asserted against params.yaml rather than a literal, because the right worker count
+    is machine-specific: it is bounded by how many densely transformed folds fit in RAM
+    at once, not by core count.
+    """
+    from src.utils.config_loader import get_section
+
     X, y = raw_xy
     search = tune_model(build_tunable_models(42)["Random Forest"],
                         SEARCH_SPACES["Random Forest"], X, y,
                         n_iter=2, cv_folds=2, random_state=42)
-    assert search.n_jobs == -1
+    assert search.n_jobs == get_section("tuning")["search_n_jobs"]
+    assert search.n_jobs != 1, "the search must own the parallelism layer"
 
 
 # ------------------------------------------------------ §15: baseline uses a Pipeline

@@ -14,6 +14,10 @@ optuna>=3.6
 # Tracking / orchestration
 mlflow>=2.14
 dvc>=3.50
+# Imported directly by src/utils/config_loader.py to read params.yaml. It arrives
+# transitively via dvc, but a direct import deserves a direct declaration — otherwise
+# dropping dvc would silently break config loading.
+pyyaml>=6.0
 
 # Explainability
 shap>=0.45

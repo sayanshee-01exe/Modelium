@@ -58,6 +58,12 @@ stages:
       - src/models/evaluation.py
       - src/models/threshold.py
       - src/models/serialization.py
+      # Imported directly by scripts/train.py to record the run and write the
+      # run_information.json handoff. Previously missing, which meant a change to either
+      # left DVC reporting the train stage up to date while its outputs came from the
+      # old code.
+      - src/tracking/mlflow_tracker.py
+      - src/models/register_model.py
       - src/features/data_preprocessing.py
       - src/data/data_preparation.py
       - src/utils/config_loader.py

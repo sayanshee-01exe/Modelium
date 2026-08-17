@@ -54,7 +54,7 @@ from src.models.evaluation import (
 )
 from src.models.threshold import find_f1_optimal_threshold
 from src.models.register_model import build_run_information, write_run_information
-from src.models.serialization import save_champion_pipeline
+from src.models.serialization import CHAMPION_PIPELINE_FILENAME, save_champion_pipeline
 from src.tracking.mlflow_tracker import PROJECT_NAME, MLflowTracker, get_git_commit
 from src.utils.logger import get_logger
 
@@ -170,7 +170,11 @@ def _run_training(params, data_params, tuning_params, random_state, tracker):
     cv_scores = {s["Model"]: s for s in summarize_tuning(searches)}
     for result in results:
         name = result["Model"]
-        with tracker.child_run(name, tags={"is_champion": str(name == best_name).lower()}):
+        with tracker.child_run(name, tags={"model": name,
+                                           "is_champion": str(name == best_name).lower()}):
+            # Also a param, not only the run name and a tag: a param is what the MLflow
+            # run table can be filtered and compared on.
+            tracker.log_params({"model": name})
             summary = cv_scores.get(name)
             if summary:
                 tracker.log_params(summary["best_params"])
@@ -178,6 +182,8 @@ def _run_training(params, data_params, tuning_params, random_state, tracker):
                 tracker.log_params({"cv_folds": summary["cv_folds"],
                                     "cv_scoring": summary["cv_scoring"]})
             else:
+                # The baseline is deliberately untuned, so it has no CV search score.
+                # Recorded as such rather than given a fabricated one.
                 tracker.log_params({"tuned": False, "role": "baseline"})
             tracker.log_metrics(result, prefix="val_")
 
@@ -300,20 +306,22 @@ def _run_training(params, data_params, tuning_params, random_state, tracker):
         ARTIFACT_DIR / "deployment_meta.json",
     ], artifact_path="metrics")
 
-    # Logged as an MLflow *model*, not as a copy of the joblib file. A raw artifact is
-    # something to download; a model carries its flavor and environment, which is what
-    # the Model Registry can version and what an alias can resolve to.
+    # Two forms of the same champion, both deliberate. The joblib is the file this
+    # project's batch inference actually loads, kept in the run history so a run is
+    # self-contained. The MLflow *model* carries its flavor and environment, which is
+    # what the Model Registry can version and what an alias can resolve to; a raw file
+    # cannot be registered.
+    tracker.log_artifact(MODEL_DIR / CHAMPION_PIPELINE_FILENAME, artifact_path="model")
     model_uri = tracker.log_model(best_model)
 
     # Handoff to the register stage. Written unconditionally — with tracking disabled it
     # records that fact and a null model_uri — because DVC declares it as an output of
     # this stage and the register stage needs somewhere to read the decision from.
-    registry_params = params["mlflow"].get("registry", {})
     write_run_information(
         build_run_information(
             tracker,
             model_uri=model_uri,
-            registered_model_name=registry_params.get("registered_model_name", "modelium"),
+            registered_model_name=params["mlflow"]["registered_model_name"],
             champion_model=best_name,
             promoted=bool(champion.promoted and operational_passed),
             optimal_threshold=frozen_threshold,
@@ -321,6 +329,9 @@ def _run_training(params, data_params, tuning_params, random_state, tracker):
         ),
         RUN_INFO_FILE,
     )
+    # Logged after it is written, so the run carries the same handoff the register stage
+    # will read. Last of all, so a tracking failure cannot cost a completed model.
+    tracker.log_artifact(RUN_INFO_FILE, artifact_path="metrics")
 
     if tracker.degraded:
         print("\nWARNING: MLflow tracking degraded — the run record is incomplete. "

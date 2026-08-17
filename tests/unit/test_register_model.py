@@ -111,40 +111,41 @@ def logged_run(local_tracker, toy_pipeline, tmp_path):
 # params.yaml declares the registry
 # ---------------------------------------------------------------------------
 
-def test_params_yaml_declares_a_registry_section() -> None:
-    registry = load_params()["mlflow"]["registry"]
-    assert registry["registered_model_name"]
-    assert registry["production_alias"]
-    assert registry["candidate_alias"]
+def test_params_yaml_declares_every_mlflow_key() -> None:
+    """The six keys the pipeline reads, all under one section."""
+    mlflow_params = load_params()["mlflow"]
+    for key in ("enabled", "tracking_uri", "experiment_name",
+                "registered_model_name", "champion_alias", "candidate_alias"):
+        assert key in mlflow_params, f"params.yaml: mlflow.{key} is missing"
 
 
 @pytest.mark.parametrize("bad", [
     {"registered_model_name": ""},
     {"registered_model_name": None},
-    {"production_alias": ""},
+    {"champion_alias": ""},
     {"candidate_alias": ""},
-    {"production_alias": 42},
+    {"champion_alias": 42},
 ])
 def test_invalid_registry_config_is_rejected(bad) -> None:
     params = copy.deepcopy(load_params())
-    params["mlflow"]["registry"].update(bad)
-    with pytest.raises(ConfigurationError, match="registry"):
+    params["mlflow"].update(bad)
+    with pytest.raises(ConfigurationError, match="mlflow"):
         validate_params(params)
 
 
 def test_the_two_aliases_must_differ() -> None:
     """One alias for both states would make an approved model indistinguishable."""
     params = copy.deepcopy(load_params())
-    alias = params["mlflow"]["registry"]["production_alias"]
-    params["mlflow"]["registry"]["candidate_alias"] = alias
+    params["mlflow"]["candidate_alias"] = params["mlflow"]["champion_alias"]
     with pytest.raises(ConfigurationError, match="alias"):
         validate_params(params)
 
 
-def test_missing_registry_section_is_rejected() -> None:
+@pytest.mark.parametrize("key", ["registered_model_name", "champion_alias", "candidate_alias"])
+def test_missing_registry_key_is_rejected(key) -> None:
     params = copy.deepcopy(load_params())
-    del params["mlflow"]["registry"]
-    with pytest.raises(ConfigurationError, match="registry"):
+    del params["mlflow"][key]
+    with pytest.raises(ConfigurationError, match=key):
         validate_params(params)
 
 
@@ -172,6 +173,35 @@ def test_enabled_tracker_exposes_the_active_run_id(local_tracker) -> None:
         run_id = local_tracker.active_run_id
         assert isinstance(run_id, str) and len(run_id) == 32
     assert local_tracker.active_run_id is None
+
+
+def test_enabled_tracker_exposes_the_active_experiment_id(local_tracker) -> None:
+    """A run id fetches a run; the experiment id is what points at it in the UI."""
+    assert local_tracker.active_experiment_id is None
+    with local_tracker.start_run(run_name="probe"):
+        assert local_tracker.active_experiment_id is not None
+    assert local_tracker.active_experiment_id is None
+
+
+def test_the_run_ends_cleanly(local_tracker) -> None:
+    """A run left open would attach the next run's metrics to this one."""
+    import mlflow
+
+    mlflow.set_tracking_uri(local_tracker.resolved_uri)
+    with local_tracker.start_run(run_name="probe"):
+        assert mlflow.active_run() is not None
+    assert mlflow.active_run() is None
+
+
+def test_the_run_ends_cleanly_even_when_training_raises(local_tracker) -> None:
+    """A crashed run must not leave the process inside an open MLflow run."""
+    import mlflow
+
+    mlflow.set_tracking_uri(local_tracker.resolved_uri)
+    with pytest.raises(RuntimeError):
+        with local_tracker.start_run(run_name="probe"):
+            raise RuntimeError("training blew up")
+    assert mlflow.active_run() is None
 
 
 def test_log_model_returns_a_resolvable_uri(logged_run) -> None:
@@ -218,6 +248,25 @@ def test_model_logging_failure_degrades_rather_than_crashes(
 
 def test_run_information_carries_every_required_key(logged_run) -> None:
     assert set(RUN_INFO_REQUIRED_KEYS).issubset(logged_run)
+
+
+@pytest.mark.parametrize("key", [
+    "run_id", "experiment_id", "tracking_uri", "champion_model", "promoted",
+    "registered_model_name",
+])
+def test_run_information_carries_the_handoff_contract(logged_run, key) -> None:
+    """The six fields the register stage cannot proceed without."""
+    assert logged_run[key] is not None
+
+
+@pytest.mark.parametrize("key", RUN_INFO_REQUIRED_KEYS)
+def test_any_missing_required_key_fails_clearly(logged_run, tmp_path, key) -> None:
+    """Every required key, not just one sampled by hand."""
+    partial = {k: v for k, v in logged_run.items() if k != key}
+    path = tmp_path / "run_information.json"
+    path.write_text(json.dumps(partial), encoding="utf-8")
+    with pytest.raises(ModelArtifactError, match=key):
+        load_run_information(path)
 
 
 def test_run_information_records_the_promotion_decision(logged_run) -> None:
@@ -279,15 +328,15 @@ def _client(tracker):
 
 
 def test_a_promoted_champion_is_registered(local_tracker, logged_run) -> None:
-    result = register_champion(logged_run, production_alias="champion",
+    result = register_champion(logged_run, champion_alias="champion",
                                candidate_alias="candidate")
     assert result is not None
     versions = _client(local_tracker).search_model_versions("name='test-champion'")
     assert [v.version for v in versions] == [result.version]
 
 
-def test_a_promoted_champion_takes_the_production_alias(local_tracker, logged_run) -> None:
-    result = register_champion(logged_run, production_alias="champion",
+def test_a_promoted_champion_takes_the_champion_alias(local_tracker, logged_run) -> None:
+    result = register_champion(logged_run, champion_alias="champion",
                                candidate_alias="candidate")
     client = _client(local_tracker)
     promoted = client.get_model_version_by_alias("test-champion", "champion")
@@ -300,7 +349,7 @@ def test_the_alias_resolves_to_a_loadable_model(local_tracker, logged_run, toy_p
     import mlflow
 
     _, X = toy_pipeline
-    register_champion(logged_run, production_alias="champion", candidate_alias="candidate")
+    register_champion(logged_run, champion_alias="champion", candidate_alias="candidate")
     mlflow.set_tracking_uri(local_tracker.resolved_uri)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -308,14 +357,14 @@ def test_the_alias_resolves_to_a_loadable_model(local_tracker, logged_run, toy_p
     assert served.predict_proba(X).shape == (len(X), 2)
 
 
-def test_a_rejected_champion_never_takes_the_production_alias(
+def test_a_rejected_champion_never_takes_the_champion_alias(
     local_tracker, logged_run,
 ) -> None:
     """The gate that blocks batch scoring must also block the registry."""
     from mlflow.exceptions import MlflowException
 
     rejected = {**logged_run, "promoted": False}
-    result = register_champion(rejected, production_alias="champion",
+    result = register_champion(rejected, champion_alias="champion",
                                candidate_alias="candidate")
     client = _client(local_tracker)
     with pytest.raises(MlflowException):
@@ -326,7 +375,7 @@ def test_a_rejected_champion_never_takes_the_production_alias(
 def test_a_rejected_champion_is_still_recorded(local_tracker, logged_run) -> None:
     """A refused run is part of the history, not something to erase."""
     rejected = {**logged_run, "promoted": False}
-    result = register_champion(rejected, production_alias="champion",
+    result = register_champion(rejected, champion_alias="champion",
                                candidate_alias="candidate")
     version = _client(local_tracker).get_model_version("test-champion", result.version)
     assert version.tags["validation_status"] == CANDIDATE_STATUS
@@ -334,9 +383,9 @@ def test_a_rejected_champion_is_still_recorded(local_tracker, logged_run) -> Non
 
 def test_registration_of_the_same_run_is_idempotent(local_tracker, logged_run) -> None:
     """DVC re-runs a stage on any dependency change; that must not fan out versions."""
-    first = register_champion(logged_run, production_alias="champion",
+    first = register_champion(logged_run, champion_alias="champion",
                               candidate_alias="candidate")
-    second = register_champion(logged_run, production_alias="champion",
+    second = register_champion(logged_run, champion_alias="champion",
                                candidate_alias="candidate")
     assert first.version == second.version
     versions = _client(local_tracker).search_model_versions("name='test-champion'")
@@ -349,9 +398,9 @@ def test_a_promotion_reversal_moves_the_alias_off_the_old_version(
     """Re-registering the same run as rejected must not leave it aliased approved."""
     from mlflow.exceptions import MlflowException
 
-    register_champion(logged_run, production_alias="champion", candidate_alias="candidate")
+    register_champion(logged_run, champion_alias="champion", candidate_alias="candidate")
     register_champion({**logged_run, "promoted": False},
-                      production_alias="champion", candidate_alias="candidate")
+                      champion_alias="champion", candidate_alias="candidate")
     client = _client(local_tracker)
     with pytest.raises(MlflowException):
         client.get_model_version_by_alias("test-champion", "champion")
@@ -366,13 +415,13 @@ def test_registration_is_skipped_when_tracking_was_disabled(tmp_path) -> None:
             champion_model="XGBoost", promoted=True, optimal_threshold=0.5,
             test_metrics={},
         )
-    assert register_champion(info, production_alias="champion",
+    assert register_champion(info, champion_alias="champion",
                              candidate_alias="candidate") is None
 
 
 def test_registration_records_run_provenance(local_tracker, logged_run) -> None:
     """A registry entry that cannot be traced to its run is not auditable."""
-    result = register_champion(logged_run, production_alias="champion",
+    result = register_champion(logged_run, champion_alias="champion",
                                candidate_alias="candidate")
     version = _client(local_tracker).get_model_version("test-champion", result.version)
     assert version.run_id == logged_run["run_id"]
@@ -386,9 +435,9 @@ def test_registration_records_run_provenance(local_tracker, logged_run) -> None:
 
 def test_registry_record_names_the_servable_uri(local_tracker, logged_run) -> None:
     """The record must answer "what is serving" without a working MLflow install."""
-    version = register_champion(logged_run, production_alias="champion",
+    version = register_champion(logged_run, champion_alias="champion",
                                 candidate_alias="candidate")
-    record = build_registry_record(logged_run, version, production_alias="champion",
+    record = build_registry_record(logged_run, version, champion_alias="champion",
                                    candidate_alias="candidate")
     assert record["registered"] is True
     assert record["model_uri"] == "models:/test-champion@champion"
@@ -400,9 +449,9 @@ def test_registry_record_points_a_rejected_model_at_the_candidate_alias(
     local_tracker, logged_run,
 ) -> None:
     rejected = {**logged_run, "promoted": False}
-    version = register_champion(rejected, production_alias="champion",
+    version = register_champion(rejected, champion_alias="champion",
                                 candidate_alias="candidate")
-    record = build_registry_record(rejected, version, production_alias="champion",
+    record = build_registry_record(rejected, version, champion_alias="champion",
                                    candidate_alias="candidate")
     assert record["model_uri"] == "models:/test-champion@candidate"
     assert record["validation_status"] == CANDIDATE_STATUS
@@ -418,16 +467,16 @@ def test_a_skip_is_recorded_with_its_reason(tmp_path) -> None:
             champion_model="XGBoost", promoted=True, optimal_threshold=0.5,
             test_metrics={},
         )
-    record = build_registry_record(info, None, production_alias="champion",
+    record = build_registry_record(info, None, champion_alias="champion",
                                    candidate_alias="candidate")
     assert record["registered"] is False
     assert "tracking was disabled" in record["skipped_reason"]
 
 
 def test_registry_record_round_trips_through_disk(tmp_path, local_tracker, logged_run) -> None:
-    version = register_champion(logged_run, production_alias="champion",
+    version = register_champion(logged_run, champion_alias="champion",
                                 candidate_alias="candidate")
-    record = build_registry_record(logged_run, version, production_alias="champion",
+    record = build_registry_record(logged_run, version, champion_alias="champion",
                                    candidate_alias="candidate")
     path = tmp_path / "nested" / "registry_record.json"
     write_registry_record(record, path)

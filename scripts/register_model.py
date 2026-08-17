@@ -33,12 +33,12 @@ logger = get_logger("modelium.register")
 
 
 def main() -> int:
-    registry = load_params()["mlflow"]["registry"]
+    registry = load_params()["mlflow"]
     run_info = load_run_information(RUN_INFO_FILE)
 
     version = register_champion(
         run_info,
-        production_alias=registry["production_alias"],
+        champion_alias=registry["champion_alias"],
         candidate_alias=registry["candidate_alias"],
     )
 
@@ -46,7 +46,7 @@ def main() -> int:
     # and "nothing was registered, because tracking was off" is itself the outcome.
     record = build_registry_record(
         run_info, version,
-        production_alias=registry["production_alias"],
+        champion_alias=registry["champion_alias"],
         candidate_alias=registry["candidate_alias"],
     )
     write_registry_record(record, REGISTRY_RECORD_FILE)
@@ -58,7 +58,7 @@ def main() -> int:
 
     name = run_info["registered_model_name"]
     status = "APPROVED" if run_info["promoted"] else "REJECTED"
-    alias = registry["production_alias"] if run_info["promoted"] else registry["candidate_alias"]
+    alias = registry["champion_alias"] if run_info["promoted"] else registry["candidate_alias"]
     print(
         f"\nRegistered {name} version {version.version} [{status}]\n"
         f"  champion : {run_info['champion_model']}\n"
@@ -69,7 +69,7 @@ def main() -> int:
     if not run_info["promoted"]:
         print(
             "  NOTE      : this version failed its quality gates. The "
-            f"'{registry['production_alias']}' alias was not assigned to it."
+            f"'{registry['champion_alias']}' alias was not assigned to it."
         )
     return 0
 

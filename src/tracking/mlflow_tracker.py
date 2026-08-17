@@ -228,6 +228,18 @@ class MLflowTracker:
         run = self._mlflow.active_run()
         return run.info.run_id if run is not None else None
 
+    @property
+    def active_experiment_id(self) -> str | None:
+        """Experiment id of the currently open run, or None outside one.
+
+        Recorded in the handoff alongside the run id: a run id alone is enough to fetch
+        a run, but not to point someone at the experiment it belongs to in the UI.
+        """
+        if not self.enabled:
+            return None
+        run = self._mlflow.active_run()
+        return run.info.experiment_id if run is not None else None
+
     # ------------------------------------------------------------------------- runs
 
     @contextmanager

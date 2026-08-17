@@ -11,7 +11,7 @@ Three decisions here are deliberate:
 a refused champion is part of the history and deleting it would leave a gap where an
 explanation should be. What promotion controls is the **alias**: the production alias is
 moved onto a version only when that run passed every quality gate, so
-``models:/<name>@<production_alias>`` cannot resolve to a model the pipeline rejected.
+``models:/<name>@<champion_alias>`` cannot resolve to a model the pipeline rejected.
 This is the same rule `src/inference/predictor.py` enforces for batch scoring, applied
 at the other end of the handoff.
 
@@ -44,7 +44,7 @@ logger = get_logger(__name__)
 # load so a half-written handoff fails naming the missing field, rather than surfacing
 # as an opaque error from inside an MLflow call.
 RUN_INFO_REQUIRED_KEYS: tuple[str, ...] = (
-    "tracking_enabled", "tracking_uri", "run_id", "model_uri",
+    "tracking_enabled", "tracking_uri", "run_id", "experiment_id", "model_uri",
     "registered_model_name", "champion_model", "promoted", "optimal_threshold",
 )
 
@@ -94,6 +94,7 @@ def build_run_information(
         "tracking_enabled": bool(tracker.enabled),
         "tracking_uri": tracker.resolved_uri if tracker.enabled else None,
         "experiment_name": tracker.experiment_name,
+        "experiment_id": tracker.active_experiment_id,
         "run_id": tracker.active_run_id,
         "model_uri": model_uri,
         "registered_model_name": registered_model_name,
@@ -129,7 +130,7 @@ def build_registry_record(
     run_info: dict[str, Any],
     version,
     *,
-    production_alias: str,
+    champion_alias: str,
     candidate_alias: str,
 ) -> dict[str, Any]:
     """Summarise what registration did, for the stage's own output.
@@ -141,7 +142,7 @@ def build_registry_record(
     Args:
         run_info: The handoff mapping the registration acted on.
         version: The `ModelVersion` created or reused, or None if nothing was registered.
-        production_alias: Alias reserved for approved versions.
+        champion_alias: Alias reserved for approved versions.
         candidate_alias: Alias for recorded-but-refused versions.
 
     Returns:
@@ -164,7 +165,7 @@ def build_registry_record(
         }
 
     promoted = bool(run_info["promoted"])
-    alias = production_alias if promoted else candidate_alias
+    alias = champion_alias if promoted else candidate_alias
     return {
         "registered": True,
         "registered_model_name": name,
@@ -265,14 +266,14 @@ def _clear_alias(client, name: str, alias: str) -> None:
 def register_champion(
     run_info: dict[str, Any],
     *,
-    production_alias: str,
+    champion_alias: str,
     candidate_alias: str,
 ):
     """Register the run's model and set the alias its promotion status earns.
 
     Args:
         run_info: Mapping from `load_run_information` / `build_run_information`.
-        production_alias: Alias for an approved version. Assigned only when
+        champion_alias: Alias for an approved version. Assigned only when
             ``run_info["promoted"]`` is true, and actively removed when it is not.
         candidate_alias: Alias for a version that was recorded but not approved.
 
@@ -336,23 +337,23 @@ def register_champion(
 
     if promoted:
         _clear_alias(client, name, candidate_alias)
-        client.set_registered_model_alias(name=name, alias=production_alias,
+        client.set_registered_model_alias(name=name, alias=champion_alias,
                                           version=version_number)
         logger.info(
             "%s version %s passed every quality gate; alias '%s' now resolves to it "
-            "(models:/%s@%s).", name, version_number, production_alias, name,
-            production_alias,
+            "(models:/%s@%s).", name, version_number, champion_alias, name,
+            champion_alias,
         )
     else:
         # Removing rather than merely not setting: a version previously approved and now
         # rejected must stop resolving under the production alias.
-        _clear_alias(client, name, production_alias)
+        _clear_alias(client, name, champion_alias)
         client.set_registered_model_alias(name=name, alias=candidate_alias,
                                           version=version_number)
         logger.warning(
             "%s version %s did NOT pass its quality gates. It is registered and aliased "
             "'%s' for traceability, and the '%s' alias has been cleared — nothing should "
-            "serve this version.", name, version_number, candidate_alias, production_alias,
+            "serve this version.", name, version_number, candidate_alias, champion_alias,
         )
 
     return version

@@ -261,18 +261,19 @@ consumer actually asks: **which recorded run should I serve, and was it approved
 Without it, "the champion" means whatever `models/champion_pipeline.joblib` happens to
 contain on one machine.
 
-The train stage logs the fitted champion as an MLflow *model* — not a copy of the joblib
-file — and writes `artifacts/run_information.json`, the handoff naming the run, the model
-URI and the promotion decision. The `register` stage reads it and files that model under
-the registered name from `params.yaml`.
+The train stage logs the fitted champion both as a file artifact and as an MLflow
+*model* — a raw file is something to download, a model carries its flavor and is the only
+form a registry can version — and writes `artifacts/run_information.json`, the handoff
+naming the run, experiment, model URI and promotion decision. The `register` stage reads
+it and files that model under `mlflow.registered_model_name` from `params.yaml`.
 
 **Registration is not promotion.** Every run that logged a model is registered, because a
 refused champion is part of the history. What promotion controls is the *alias*:
 
-| Outcome | Alias | Version tag |
+| Outcome | Alias (`params.yaml`) | Version tag |
 | --- | --- | --- |
-| Passed every quality gate | `champion` | `validation_status=approved` |
-| Failed a gate | `candidate` | `validation_status=rejected` |
+| Passed every quality gate | `champion_alias` → `champion` | `validation_status=approved` |
+| Failed a gate | `candidate_alias` → `candidate` | `validation_status=rejected` |
 
 So `models:/modelium-credit-risk-champion@champion` cannot resolve to a model the
 pipeline rejected — the same rule `src/inference/predictor.py` enforces for batch

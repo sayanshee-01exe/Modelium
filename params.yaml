@@ -59,6 +59,20 @@ mlflow:
   # The relative path is anchored to the repo root, not the working directory.
   tracking_uri: sqlite:///mlflow.db
 
+  # Model Registry. Tracking answers "what happened in this run"; the registry answers
+  # "which recorded run should a consumer serve, and was it approved". A run is always
+  # registered — a refused champion is part of the history — but the two aliases are
+  # what separate approved from merely recorded, so they must never collapse into one.
+  registry:
+    # Stable name every version is filed under. Changing it starts a fresh history.
+    registered_model_name: modelium-credit-risk-champion
+    # Moved onto a version only when that run passed every quality gate. The URI a
+    # serving layer resolves is models:/<registered_model_name>@<production_alias>.
+    production_alias: champion
+    # Where a version lands when it was recorded but not approved. Nothing serves
+    # from this alias; it exists so a rejected run is still traceable.
+    candidate_alias: candidate
+
 threshold:
   # Tuned on the validation split only, then frozen before test is ever read.
   strategy: f1

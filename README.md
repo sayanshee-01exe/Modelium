@@ -39,14 +39,20 @@ Final Test Evaluation   test read exactly once
         ↓
 Champion Pipeline       preprocessing + model, one artifact
         ↓
+        ├──→ Model Registry   versioned, aliased by promotion status
+        ↓
 Batch Inference
 ```
 
 DVC DAG:
 
 ```text
-validate → prepare → train → predict
+validate → prepare → train ─┬→ register
+                            └→ predict
 ```
+
+`register` is a leaf, not a link in the chain. Batch scoring loads the local champion
+artifact, so a registry outage cannot stop the pipeline producing predictions.
 
 ---
 
@@ -205,6 +211,7 @@ Individual stages:
 dvc repro validate
 dvc repro prepare
 dvc repro train
+dvc repro register
 dvc repro predict
 ```
 
@@ -247,6 +254,49 @@ database (MLflow 3 retired the plain `./mlruns` file store) and artifacts in
 params DVC tracks for the train stage, so renaming an experiment does not invalidate a
 multi-hour run.
 
+### Model registry
+
+Tracking answers *what happened in this run*. The registry answers the question a
+consumer actually asks: **which recorded run should I serve, and was it approved?**
+Without it, "the champion" means whatever `models/champion_pipeline.joblib` happens to
+contain on one machine.
+
+The train stage logs the fitted champion as an MLflow *model* — not a copy of the joblib
+file — and writes `artifacts/run_information.json`, the handoff naming the run, the model
+URI and the promotion decision. The `register` stage reads it and files that model under
+the registered name from `params.yaml`.
+
+**Registration is not promotion.** Every run that logged a model is registered, because a
+refused champion is part of the history. What promotion controls is the *alias*:
+
+| Outcome | Alias | Version tag |
+| --- | --- | --- |
+| Passed every quality gate | `champion` | `validation_status=approved` |
+| Failed a gate | `candidate` | `validation_status=rejected` |
+
+So `models:/modelium-credit-risk-champion@champion` cannot resolve to a model the
+pipeline rejected — the same rule `src/inference/predictor.py` enforces for batch
+scoring, applied at the other end of the handoff. A reversal *moves* the alias: a version
+that was approved and is re-registered as rejected has the production alias removed, not
+merely left unset.
+
+**Re-running is idempotent.** DVC re-runs a stage whenever a dependency changes, so
+registering the same `run_id` twice reuses the version it already created rather than
+stacking versions that differ only in when the command ran.
+
+```bash
+dvc repro register
+cat artifacts/registry_record.json   # what was registered, under which alias
+```
+
+The registry is external state DVC can neither cache nor restore, so the stage outputs
+`artifacts/registry_record.json` — the pipeline's own record of the outcome, readable
+without a working MLflow install. With `mlflow.enabled: false` there is no run to
+register; the stage records the skip and succeeds rather than failing the pipeline.
+
+The store is the same local SQLite database used for tracking. There is no remote
+tracking server.
+
 ### params.yaml
 
 `params.yaml` is the single source of truth for experiment configuration — split sizes, seed, IQR
@@ -278,7 +328,8 @@ modelium/
 ├── src/
 │   ├── data/                     # loading, validation, cleaning, aggregation, splitting
 │   ├── features/                 # domain features, preprocessing
-│   ├── models/                   # training, tuning, evaluation, selection, threshold, serialization
+│   ├── models/                   # training, tuning, evaluation, selection, threshold,
+│   │                             #   serialization, registry
 │   ├── inference/                # Predictor
 │   ├── tracking/                 # MLflow experiment tracking
 │   ├── explainability/           # SHAP scaffolding (not wired into the pipeline)
@@ -289,9 +340,11 @@ modelium/
 │   ├── validate_data.py          # DVC stage 1
 │   ├── prepare_data.py           # DVC stage 2
 │   ├── train.py                  # DVC stage 3
-│   └── predict.py                # DVC stage 4
+│   ├── register_model.py         # DVC stage 4
+│   └── predict.py                # DVC stage 5
 ├── tests/unit/
-├── artifacts/                    # metrics, deployment metadata, predictions (gitignored)
+├── artifacts/                    # metrics, deployment metadata, run/registry records,
+│                                 #   predictions (gitignored)
 └── models/                       # champion_pipeline.joblib (gitignored)
 ```
 
@@ -311,10 +364,11 @@ modelium/
 - Reproducible DVC pipeline with `params.yaml`
 - Batch inference with promotion safety
 - MLflow experiment tracking (local)
+- MLflow Model Registry with promotion-gated aliases (local)
 
 **Not yet implemented**
 
-- MLflow Model Registry and remote tracking server
+- Remote MLflow tracking server
 - SHAP explainability reporting
 - Model monitoring (drift, fairness)
 - FastAPI serving

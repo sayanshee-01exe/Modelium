@@ -39,7 +39,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config import (
     TARGET_COL, ID_COL, MODEL_DIR, ARTIFACT_DIR, METRICS_DIR,
-    PREPARE_REPORT_FILE, TRAIN_FEATURES_FILE,
+    PREPARE_REPORT_FILE, RUN_INFO_FILE, TRAIN_FEATURES_FILE,
 )
 from src.data.data_preparation import split_train_val_test
 from src.features.data_preprocessing import (
@@ -53,7 +53,8 @@ from src.models.evaluation import (
     PRIMARY_METRIC, evaluate_model, evaluate_at_threshold, get_probability_scores,
 )
 from src.models.threshold import find_f1_optimal_threshold
-from src.models.serialization import CHAMPION_PIPELINE_FILENAME, save_champion_pipeline
+from src.models.register_model import build_run_information, write_run_information
+from src.models.serialization import save_champion_pipeline
 from src.tracking.mlflow_tracker import PROJECT_NAME, MLflowTracker, get_git_commit
 from src.utils.logger import get_logger
 
@@ -298,7 +299,29 @@ def _run_training(params, data_params, tuning_params, random_state, tracker):
         METRICS_DIR / "test_metrics.json",
         ARTIFACT_DIR / "deployment_meta.json",
     ], artifact_path="metrics")
-    tracker.log_artifact(MODEL_DIR / CHAMPION_PIPELINE_FILENAME, artifact_path="model")
+
+    # Logged as an MLflow *model*, not as a copy of the joblib file. A raw artifact is
+    # something to download; a model carries its flavor and environment, which is what
+    # the Model Registry can version and what an alias can resolve to.
+    model_uri = tracker.log_model(best_model)
+
+    # Handoff to the register stage. Written unconditionally — with tracking disabled it
+    # records that fact and a null model_uri — because DVC declares it as an output of
+    # this stage and the register stage needs somewhere to read the decision from.
+    registry_params = params["mlflow"].get("registry", {})
+    write_run_information(
+        build_run_information(
+            tracker,
+            model_uri=model_uri,
+            registered_model_name=registry_params.get("registered_model_name", "modelium"),
+            champion_model=best_name,
+            promoted=bool(champion.promoted and operational_passed),
+            optimal_threshold=frozen_threshold,
+            test_metrics=test_metrics,
+        ),
+        RUN_INFO_FILE,
+    )
+
     if tracker.degraded:
         print("\nWARNING: MLflow tracking degraded — the run record is incomplete. "
               "The model and its metrics on disk are unaffected.")

@@ -74,6 +74,11 @@ stages:
     outs:
       - models/champion_pipeline.joblib
       - artifacts/deployment_meta.json
+      # Handoff to the register stage: which tracked run produced the champion and
+      # whether it was approved. Written even with tracking disabled, so the stage
+      # contract holds either way.
+      - artifacts/run_information.json:
+          cache: false
       - artifacts/metrics/validation_leaderboard.csv:
           cache: false
       - artifacts/metrics/tuning_summary.csv:
@@ -82,6 +87,31 @@ stages:
           cache: false
     metrics:
       - artifacts/metrics/test_metrics.json:
+          cache: false
+
+  # Files the trained champion into the MLflow Model Registry, aliased by whether it
+  # passed its quality gates. Reads the train stage's handoff file, no data and no model.
+  #
+  # Deliberately a leaf, not a link in the chain to `predict`: batch scoring loads the
+  # local champion artifact, so a registry outage cannot stop the pipeline producing
+  # predictions. The registry itself is external state DVC cannot restore, so the stage
+  # outputs its own record of what it did rather than pretending to cache the registry.
+  register:
+    cmd: python scripts/register_model.py
+    deps:
+      - scripts/register_model.py
+      - src/models/register_model.py
+      - src/tracking/mlflow_tracker.py
+      - src/utils/config_loader.py
+      - config/config.py
+      - artifacts/run_information.json
+    # The one stage that genuinely reads the `mlflow:` section, so renaming the
+    # registered model or swapping an alias re-runs registration — without touching
+    # training, which reads none of it.
+    params:
+      - mlflow
+    outs:
+      - artifacts/registry_record.json:
           cache: false
 
   # Scores the prepared application_test features with the frozen champion. No training,

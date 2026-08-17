@@ -55,6 +55,13 @@ VALID_SCORINGS: frozenset[str] = frozenset({"average_precision", "roc_auc", "neg
 
 VALID_THRESHOLD_STRATEGIES: frozenset[str] = frozenset({"f1"})
 
+# Keys the `mlflow.registry` subsection must declare. The two aliases are separate
+# entries rather than one because "approved" and "recorded but refused" are different
+# states, and a serving layer resolves only the first.
+REGISTRY_KEYS: tuple[str, ...] = (
+    "registered_model_name", "production_alias", "candidate_alias",
+)
+
 # Metric name the leaderboard and gates use, paired with the sklearn scorer the search
 # optimises. Ranking by a different estimator of the PR curve than the one being
 # optimised lets the search winner lose the selection.
@@ -226,6 +233,31 @@ def validate_params(params: dict) -> dict:
             raise ConfigurationError(
                 f"params.yaml: 'mlflow.{key}' must be a non-empty string, got {value!r}"
             )
+
+    # --- mlflow.registry --------------------------------------------------------
+    # Checked even when tracking is disabled: the values decide what a *later* enabled
+    # run would be filed under, and a typo found at load costs milliseconds while the
+    # same typo found after training costs the run.
+    registry = tracking.get("registry")
+    if not isinstance(registry, dict):
+        raise ConfigurationError(
+            f"params.yaml: 'mlflow.registry' must be a mapping with "
+            f"{sorted(REGISTRY_KEYS)}, got {type(registry).__name__}"
+        )
+    for key in REGISTRY_KEYS:
+        value = _require(registry, key, "mlflow.registry")
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigurationError(
+                f"params.yaml: 'mlflow.registry.{key}' must be a non-empty string, "
+                f"got {value!r}"
+            )
+    if registry["production_alias"].strip() == registry["candidate_alias"].strip():
+        raise ConfigurationError(
+            f"params.yaml: 'mlflow.registry.production_alias' and 'candidate_alias' are "
+            f"both {registry['production_alias']!r}. One alias for both states makes an "
+            f"approved model indistinguishable from a rejected one, which is the whole "
+            f"point of having two."
+        )
 
     # --- models -----------------------------------------------------------------
     models = params["models"]

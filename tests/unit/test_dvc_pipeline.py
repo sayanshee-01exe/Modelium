@@ -24,7 +24,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 DVC_FILE = PROJECT_ROOT / "dvc.yaml"
-STAGE_ORDER = ("validate", "prepare", "train", "predict")
+STAGE_ORDER = ("validate", "prepare", "train", "register", "predict")
+
+# Stages that cost real time or produce the model. The invariants about what may
+# invalidate a stage are only interesting for these — `register` costs a second, so
+# re-running it is not the accident the others would be.
+EXPENSIVE_STAGES = ("validate", "prepare", "train", "predict")
 
 
 @pytest.fixture(scope="module")
@@ -52,7 +57,7 @@ def test_dvc_yaml_exists_and_parses(pipeline) -> None:
     assert isinstance(pipeline, dict) and "stages" in pipeline
 
 
-def test_all_four_stages_are_defined(stages) -> None:
+def test_every_stage_is_defined(stages) -> None:
     assert set(stages) == set(STAGE_ORDER)
 
 
@@ -132,13 +137,28 @@ def test_train_declares_the_params_sections_it_reads(stages) -> None:
     assert set(stages["train"].get("params", [])) == set(MODEL_SECTIONS)
 
 
-def test_no_stage_depends_on_tracking_configuration(stages) -> None:
-    """Observability config must never invalidate a pipeline stage."""
+def test_no_expensive_stage_depends_on_tracking_configuration(stages) -> None:
+    """Tracking config must never invalidate a stage that costs time or makes the model.
+
+    Narrowed from "no stage at all" when the register stage arrived. That stage genuinely
+    *reads* `mlflow:` — renaming the registered model or swapping an alias should re-run
+    it — and it costs a second. The rule that matters is the one this test now states:
+    switching tracking off must not throw away a multi-hour search.
+    """
     from src.utils.config_loader import TRACKING_SECTIONS
 
-    for name, stage in stages.items():
-        assert set(TRACKING_SECTIONS).isdisjoint(stage.get("params", [])), \
+    for name in EXPENSIVE_STAGES:
+        assert set(TRACKING_SECTIONS).isdisjoint(stages[name].get("params", [])), \
             f"{name} would re-run when tracking config changes"
+
+
+def test_the_register_stage_is_the_only_consumer_of_tracking_configuration(stages) -> None:
+    """A section no stage declares is a claim DVC does not honour."""
+    from src.utils.config_loader import TRACKING_SECTIONS
+
+    consumers = {name for name, stage in stages.items()
+                 if not set(TRACKING_SECTIONS).isdisjoint(stage.get("params", []))}
+    assert consumers == {"register"}
 
 
 def test_parameter_free_stages_declare_no_params(stages) -> None:
@@ -176,7 +196,8 @@ def test_no_output_is_claimed_by_two_stages(stages) -> None:
 
 # ---------------------------------------------------------------- script importability
 
-@pytest.mark.parametrize("script", ["validate_data", "prepare_data", "train", "predict"])
+@pytest.mark.parametrize(
+    "script", ["validate_data", "prepare_data", "train", "register_model", "predict"])
 def test_stage_script_imports_without_side_effects(script) -> None:
     """Importing must not read data or train — every script guards on __main__."""
     spec = importlib.util.spec_from_file_location(

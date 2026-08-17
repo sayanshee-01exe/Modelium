@@ -172,11 +172,63 @@ P2 = nice-to-have if time allows.
   - Files: `dvc.yaml`, `dvc.lock`, all `src/**/*.py` (entry points), `scripts/train.py`
     (reduced to a thin local wrapper)
 
-- [ ] Task 11: `register_model` stage (P1)
+- [x] Task 11: `register_model` stage (P1)
   - Acceptance: `src/models/register_model.py` reads `run_information.json` and registers the
     champion run into the MLflow model registry under a stable name, mirroring the reference
     repo's final stage; re-running is idempotent (new version, not a duplicate entry).
   - Files: `src/models/register_model.py`, `tests/unit/test_register_model.py`
+  - Completed: 2026-08-17 — `register` wired as a DVC stage between `train` and nothing:
+    it is a **leaf**, deliberately not in the path to `predict`, so a registry outage cannot
+    stop the pipeline producing predictions. Follows the reference repo's
+    `swiggy-delivery-time-prediction` final stage (`run_information.json` handoff →
+    `mlflow.register_model` → alias + `validation_status` tag), adapted in three ways the
+    reference does not do:
+    - **Promotion gates the alias, not the registration.** The reference registers and
+      unconditionally aliases `candidate`. Here every run that logged a model is registered
+      (a refused champion is part of the history), but the `champion` alias is assigned only
+      when the run passed every quality gate — so `models:/<name>@champion` cannot resolve to
+      a model the pipeline rejected. Same rule `src/inference/predictor.py` already enforces
+      for batch scoring, applied at the other end.
+    - **A reversal moves the alias.** Re-registering a previously-approved version as rejected
+      *removes* the production alias rather than merely not setting it. Leaving it would keep
+      an approved-looking model resolving after it stopped being one.
+    - **Idempotent on `run_id`.** DVC re-runs a stage on any dependency change; the reference
+      would create a near-identical version each time. `_existing_version_for_run` reuses the
+      version already created from that run. Verified for real: three consecutive runs, one
+      version.
+  - Also required, and not in the original task description: the tracker had **no way to
+    address a run after the fact**. Added `MLflowTracker.active_run_id`, `.resolved_uri` and
+    `.log_model()`. The last one replaces logging `champion_pipeline.joblib` as a *file*
+    artifact — a raw file is something to download; an MLflow model carries its flavor and
+    is what a registry alias can resolve. Serialisation forced to `cloudpickle`: MLflow 3's
+    default `skops` format covers the sklearn object graph only and cannot serialise the
+    XGBoost/LightGBM estimator at the end of the champion pipeline.
+  - Tests: `tests/unit/test_register_model.py`, 39 tests, written before implementation and
+    confirmed RED first. Registry behaviour runs against a real SQLite-backed MLflow store
+    under `tmp_path` — the same backend `params.yaml` configures — rather than a mock, so the
+    promotion, reversal and idempotency assertions exercise the actual registry.
+  - Verified beyond the unit tests: a real `XGBClassifier` over the project's own
+    `build_preprocessor` `ColumnTransformer` was logged, registered, re-registered
+    (reused version 1), then re-registered as rejected (alias moved to `candidate`,
+    `champion` cleared), by running `scripts/register_model.py` itself. `dvc dag` confirms
+    `register` hangs off `train` and is not upstream of `predict`.
+  - Two of my own tests in `tests/unit/test_dvc_pipeline.py` were wrong once this stage
+    existed and were corrected rather than worked around: `test_all_four_stages_are_defined`
+    (renamed, the count was in the name) and `test_no_stage_depends_on_tracking_configuration`,
+    which forbade *any* stage declaring the `mlflow:` params section. The register stage
+    genuinely reads it — renaming the registered model should re-run registration — so the
+    rule was narrowed to the stages the invariant was actually protecting (the expensive ones)
+    and a companion test now asserts `register` is its *only* consumer, so the section cannot
+    silently become unread.
+  - Security: semgrep `--config auto` clean (0 findings, 290 rules, 38 files). Full suite
+    562 passed.
+  - Discovered, not fixed here (needs its own task): **`models/champion_pipeline.joblib` can
+    no longer be loaded by the installed sklearn.** The artifact was pickled by the 2026-08-12
+    run under an older sklearn; `joblib.load` now raises `AttributeError: Can't get attribute
+    '_RemainderColsList' on sklearn.compose._column_transformer` under sklearn 1.9.0. Nothing
+    in the test suite loads the stored artifact, so this is invisible to CI — the tests build
+    their own pipelines. `dvc repro train` regenerates it; the durable fix is a test that
+    round-trips the *shipped* artifact, plus pinning sklearn in `requirements.txt`.
 
 - [ ] Task 12: Activate explainability + monitoring modules (P1)
   - Acceptance: `src/explainability/shap_explainer.py` extended with `_claude`'s

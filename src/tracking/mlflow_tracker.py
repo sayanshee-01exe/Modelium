@@ -54,6 +54,17 @@ SQLITE_PREFIX = "sqlite:///"
 # opted into — so the database holds the run metadata and this directory holds the files.
 ARTIFACT_DIRNAME = "mlartifacts"
 
+# Artifact sub-path the champion pipeline is logged under. The registry resolves
+# `runs:/<run_id>/<MODEL_ARTIFACT_PATH>`, so this name is part of the handoff contract
+# between the train and register stages.
+MODEL_ARTIFACT_PATH = "model"
+
+# The champion pipeline's final step is an XGBoost or LightGBM estimator, neither of
+# which MLflow 3's default `skops` format can serialise — skops covers the sklearn
+# object graph only. cloudpickle handles the whole pipeline, and matches what
+# `models/champion_pipeline.joblib` already is.
+MODEL_SERIALIZATION_FORMAT = "cloudpickle"
+
 
 class MLflowTrackingError(ModeliumError):
     """Raised when tracking is enabled but MLflow cannot be initialised.
@@ -192,6 +203,31 @@ class MLflowTracker:
             tracking_uri=section.get("tracking_uri", "mlruns"),
         )
 
+    # -------------------------------------------------------------------- identity
+
+    @property
+    def resolved_uri(self) -> str:
+        """The tracking URI actually in use, repo-anchored.
+
+        The register stage runs as a separate process and must point at the same store
+        this run wrote to. Reading it back from the tracker rather than re-deriving it
+        from params.yaml keeps one implementation of the anchoring rule.
+        """
+        return self._resolve_uri(self.tracking_uri)
+
+    @property
+    def active_run_id(self) -> str | None:
+        """Run id of the currently open run, or None outside one (or when disabled).
+
+        This is what makes a run addressable after the process ends: the registry
+        identifies a model version by the run that produced it, so without this the
+        training run and the registered artifact could not be tied together.
+        """
+        if not self.enabled:
+            return None
+        run = self._mlflow.active_run()
+        return run.info.run_id if run is not None else None
+
     # ------------------------------------------------------------------------- runs
 
     @contextmanager
@@ -295,3 +331,50 @@ class MLflowTracker:
         """Log several files, skipping any that are absent."""
         for path in paths:
             self.log_artifact(path, artifact_path=artifact_path)
+
+    def log_model(self, pipeline, artifact_path: str = MODEL_ARTIFACT_PATH) -> str | None:
+        """Log the fitted champion as an MLflow *model*, returning its URI.
+
+        This is deliberately not `log_artifact(champion_pipeline.joblib)`. A raw file is
+        something to download; an MLflow model carries its flavor and environment, which
+        is what the Model Registry can version and what `mlflow.sklearn.load_model` can
+        resolve from an alias. Both are kept: the joblib on disk is what batch inference
+        loads, and this is what the registry hands out.
+
+        Args:
+            pipeline: The fitted `Pipeline` (preprocessing + estimator).
+            artifact_path: Sub-path within the run. Part of the register stage's
+                contract, so it should not be varied per call.
+
+        Returns:
+            A resolvable model URI, or None if tracking is disabled or logging failed.
+            A None return degrades the run rather than ending it — a completed model is
+            worth more than its registry entry, and the register stage reports the gap.
+        """
+        if not self.enabled:
+            return None
+
+        try:
+            import mlflow.sklearn
+
+            info = mlflow.sklearn.log_model(
+                pipeline,
+                name=artifact_path,
+                serialization_format=MODEL_SERIALIZATION_FORMAT,
+            )
+        except Exception as err:
+            self.degraded = True
+            logger.warning(
+                "MLflow: failed to log the champion model: %s. The pipeline on disk is "
+                "unaffected, but this run cannot be registered.", err, exc_info=True,
+            )
+            return None
+
+        # MLflow 3 returns a `models:/m-<id>` logged-model URI. Preferred over the
+        # `runs:/` form it supersedes, with that form kept as the fallback so an older
+        # backend that returns no URI still yields something resolvable.
+        model_uri = getattr(info, "model_uri", None)
+        if not model_uri:
+            model_uri = f"runs:/{self.active_run_id}/{artifact_path}"
+        logger.info("MLflow: logged champion model at %s", model_uri)
+        return model_uri

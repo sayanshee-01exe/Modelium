@@ -34,6 +34,14 @@ TRAIN_FEATURES_FILE = PROCESSED_DIR / "train_features.parquet"
 TEST_FEATURES_FILE = PROCESSED_DIR / "test_features.parquet"
 PREPARE_REPORT_FILE = PROCESSED_DIR / "prepare_report.json"
 VALIDATION_REPORT_FILE = METRICS_DIR / "raw_data_validation.json"
+# Handoff from the train stage to the register stage: which tracked run produced the
+# champion, and whether it was approved. Written on every training run, including one
+# with tracking disabled, because DVC declares it as a stage output.
+RUN_INFO_FILE = ARTIFACT_DIR / "run_information.json"
+# What the register stage actually did: which version was created, under which alias,
+# and whether it was approved. The registry itself is external state DVC cannot restore,
+# so this is the pipeline's own record of the outcome.
+REGISTRY_RECORD_FILE = ARTIFACT_DIR / "registry_record.json"
 
 # Registry of every raw table on disk. Task 5 reworks the loader to pull subsets per
 # stage rather than reading all of these at once (defect D1), so listing a file here

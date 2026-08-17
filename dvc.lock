@@ -27,14 +27,14 @@ stages:
     outs:
     - path: artifacts/metrics/raw_data_validation.json
       hash: md5
-      md5: 0aaf73404798129647852227d106716e
+      md5: c7ff2b264f9d16340a3bdd23d83b27cd
       size: 705
   prepare:
     cmd: python scripts/prepare_data.py
     deps:
     - path: artifacts/metrics/raw_data_validation.json
       hash: md5
-      md5: 0aaf73404798129647852227d106716e
+      md5: c7ff2b264f9d16340a3bdd23d83b27cd
       size: 705
     - path: config/config.py
       hash: md5
@@ -72,35 +72,35 @@ stages:
     outs:
     - path: data/processed/prepare_report.json
       hash: md5
-      md5: 90fc6b2749a99104c33dcc88abab14ec
+      md5: 2e25ca2248b14440a769a0b8bf514553
       size: 1038
     - path: data/processed/test_features.parquet
       hash: md5
-      md5: 9df932fb569661ab56ef6d82415e3e4c
-      size: 36310831
+      md5: 10970735fbc4616a23c92b36939491ec
+      size: 36310839
     - path: data/processed/train_features.parquet
       hash: md5
-      md5: 429115c8d86a0acf3d7a0e50d56360ec
-      size: 160407326
+      md5: 8fac3f9128d1fe638ce5f412be5d31d2
+      size: 160407154
   train:
     cmd: python scripts/train.py
     deps:
     - path: config/config.py
       hash: md5
-      md5: b2aef7f898604af96653c9ea0c2bc492
-      size: 2393
+      md5: fdc274fb45a4cf2a1c0877b8c00d548c
+      size: 2978
     - path: data/processed/prepare_report.json
       hash: md5
-      md5: 0e072204de2229387284f428e484b054
+      md5: 2e25ca2248b14440a769a0b8bf514553
       size: 1038
     - path: data/processed/train_features.parquet
       hash: md5
-      md5: 429115c8d86a0acf3d7a0e50d56360ec
-      size: 160407326
+      md5: 8fac3f9128d1fe638ce5f412be5d31d2
+      size: 160407154
     - path: scripts/train.py
       hash: md5
-      md5: 03f6c21651a7a0fbd166e291c3362cb2
-      size: 10389
+      md5: 09b8afffd86ec146d4005527d7fae2e8
+      size: 16794
     - path: src/data/data_preparation.py
       hash: md5
       md5: 39f461d1ca860f709b0b53a9ae2bd387
@@ -113,6 +113,10 @@ stages:
       hash: md5
       md5: 0661d2e18d0e1caec8b4efcd9fd77483
       size: 2931
+    - path: src/models/register_model.py
+      hash: md5
+      md5: 235d44ecf4a000f895dcc30f84c7786e
+      size: 15316
     - path: src/models/selection.py
       hash: md5
       md5: cd4174c93c2f47f808e94b8427ce81f8
@@ -133,10 +137,14 @@ stages:
       hash: md5
       md5: 64039cbd566f9a63b69db84a0adb8628
       size: 11431
+    - path: src/tracking/mlflow_tracker.py
+      hash: md5
+      md5: 207f6ca7b26c84ac159a1348d2fbfc7c
+      size: 16604
     - path: src/utils/config_loader.py
       hash: md5
-      md5: 2b74d8173cf442b22aaa9ef16364828f
-      size: 10974
+      md5: a927a49fa38b0d2ada84f50e511f4ef1
+      size: 13604
     params:
       params.yaml:
         data:
@@ -281,47 +289,51 @@ stages:
     outs:
     - path: artifacts/deployment_meta.json
       hash: md5
-      md5: f47f811b03f0d1ac9d9f8b98e644e837
-      size: 48546
+      md5: 9e7d029717b7cfef9bfd048aa503bb25
+      size: 48553
     - path: artifacts/metrics/test_metrics.csv
       hash: md5
-      md5: 9ec8dfdb672e65dbd66706e275fcc752
-      size: 255
+      md5: f6843514917c3e966d82fc37557d33b8
+      size: 256
     - path: artifacts/metrics/test_metrics.json
       hash: md5
-      md5: 9c56fd7011455bb56dfc1a53511c3a64
+      md5: e2de89d1e77fe1f5e115386ce46d3814
       size: 301
     - path: artifacts/metrics/tuning_summary.csv
       hash: md5
-      md5: 40b9a4dc4396866667f39edae46c1dab
+      md5: ec1662b07690be8fbfeebc260aa10747
       size: 866
     - path: artifacts/metrics/validation_leaderboard.csv
       hash: md5
-      md5: b6f29285c01dd4c1b95a9f910a56f435
-      size: 593
+      md5: 95979e456e9928614f202f934a1275c1
+      size: 595
+    - path: artifacts/run_information.json
+      hash: md5
+      md5: cc98daf379f8d92378a907a1a3373093
+      size: 910
     - path: models/champion_pipeline.joblib
       hash: md5
-      md5: c743c2bd0e818a14e1609fd2d38b20b4
-      size: 244959
+      md5: b27ff78adafe213d7cf09dfcbaf5fc7a
+      size: 415676
   predict:
     cmd: python scripts/predict.py
     deps:
     - path: artifacts/deployment_meta.json
       hash: md5
-      md5: f47f811b03f0d1ac9d9f8b98e644e837
-      size: 48546
+      md5: 9e7d029717b7cfef9bfd048aa503bb25
+      size: 48553
     - path: config/config.py
       hash: md5
-      md5: b2aef7f898604af96653c9ea0c2bc492
-      size: 2393
+      md5: fdc274fb45a4cf2a1c0877b8c00d548c
+      size: 2978
     - path: data/processed/test_features.parquet
       hash: md5
-      md5: 9df932fb569661ab56ef6d82415e3e4c
-      size: 36310831
+      md5: 10970735fbc4616a23c92b36939491ec
+      size: 36310839
     - path: models/champion_pipeline.joblib
       hash: md5
-      md5: c743c2bd0e818a14e1609fd2d38b20b4
-      size: 244959
+      md5: b27ff78adafe213d7cf09dfcbaf5fc7a
+      size: 415676
     - path: scripts/predict.py
       hash: md5
       md5: b327f58ec9ee6dfa7492935c9251c50f
@@ -341,5 +353,46 @@ stages:
     outs:
     - path: artifacts/predictions/test_predictions.csv
       hash: md5
-      md5: 11bc798219c35380e91266340d1b60bb
-      size: 1382680
+      md5: 9c19515ccd17ba3759d4466399e2937e
+      size: 1382384
+  register:
+    cmd: python scripts/register_model.py
+    deps:
+    - path: artifacts/run_information.json
+      hash: md5
+      md5: cc98daf379f8d92378a907a1a3373093
+      size: 910
+    - path: config/config.py
+      hash: md5
+      md5: fdc274fb45a4cf2a1c0877b8c00d548c
+      size: 2978
+    - path: scripts/register_model.py
+      hash: md5
+      md5: db9f03771bebe6b37762b9337412cdb2
+      size: 2924
+    - path: src/models/register_model.py
+      hash: md5
+      md5: 235d44ecf4a000f895dcc30f84c7786e
+      size: 15316
+    - path: src/tracking/mlflow_tracker.py
+      hash: md5
+      md5: 207f6ca7b26c84ac159a1348d2fbfc7c
+      size: 16604
+    - path: src/utils/config_loader.py
+      hash: md5
+      md5: a927a49fa38b0d2ada84f50e511f4ef1
+      size: 13604
+    params:
+      params.yaml:
+        mlflow:
+          enabled: true
+          experiment_name: modelium-credit-risk
+          tracking_uri: sqlite:///mlflow.db
+          registered_model_name: modelium-credit-risk-champion
+          champion_alias: champion
+          candidate_alias: candidate
+    outs:
+    - path: artifacts/registry_record.json
+      hash: md5
+      md5: a96c0c854e6282f4a208d6434794849f
+      size: 885

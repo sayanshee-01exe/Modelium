@@ -197,22 +197,50 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Place the Home Credit CSVs in `data/raw/`, then:
+**The virtual environment must be active before you run DVC.** DVC stage commands are
+plain `python scripts/....py`, and `python` resolves against `PATH`. Without `.venv` on
+it you get whatever interpreter the shell offers — typically a system or Anaconda Python
+that has pandas but no `mlflow`, `xgboost` or `lightgbm`.
+
+The loud half of that failure is harmless: `train` dies immediately with
+`No module named 'mlflow'`. The quiet half is not — `validate` and `prepare` run to
+completion under the wrong interpreter and write real outputs, so a pipeline can end up
+reproduced half under one Python and half under another with nothing to show for it.
+
+Use the Makefile, which puts `.venv/bin` on `PATH` for you and checks the interpreter
+first:
 
 ```bash
-pytest tests/unit -v          # no data required
-dvc dag                       # inspect the pipeline
-dvc repro                     # run every out-of-date stage
+make venv-check               # confirm .venv exists and has the training deps
+make repro                    # run every out-of-date stage
+make dag                      # inspect the pipeline
+make test                     # unit suite, no data required
 ```
 
 Individual stages:
 
 ```bash
-dvc repro validate
-dvc repro prepare
-dvc repro train
-dvc repro register
-dvc repro predict
+make train
+make register
+make predict
+```
+
+If you would rather not use `make`, either activate the environment first
+(`source .venv/bin/activate`) or set `PATH` explicitly — never point DVC at an absolute
+interpreter path, which would only be correct on one machine:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" dvc repro
+```
+
+One DVC flag is worth knowing before you reach for it. `dvc repro <stage> --force`
+propagates **upstream** — it forces every stage the target depends on, not just the one
+named — and DVC deletes a stage's outputs *before* re-running it. So a `--force` on
+`register` will begin re-running `train`, and interrupting it leaves the champion
+deleted. To force a single stage, confine it with `-s`:
+
+```bash
+dvc repro --single-item --force register    # or: make register-force
 ```
 
 `dvc repro` skips stages whose dependencies are unchanged, and `dvc status` reports what is stale.
@@ -285,10 +313,31 @@ merely left unset.
 registering the same `run_id` twice reuses the version it already created rather than
 stacking versions that differ only in when the command ran.
 
+Inspect what is registered, from the terminal:
+
 ```bash
-dvc repro register
-cat artifacts/registry_record.json   # what was registered, under which alias
+make register                        # run the stage
+make registry-show                   # versions, aliases and promotion status
+cat artifacts/registry_record.json   # what the last run registered
 ```
+
+`make registry-show` prints one row per version with its `validation_status`, aliases and
+source run, then the serving URI — or an explicit statement that no version holds the
+champion alias, which is a refusal rather than a gap.
+
+Load the approved model the way a consumer would:
+
+```python
+import mlflow
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
+model = mlflow.sklearn.load_model("models:/modelium-credit-risk-champion@champion")
+model.predict_proba(raw_dataframe)      # preprocessing travels with the pipeline
+```
+
+The same call with `@candidate` loads a version that failed its gates — useful for
+debugging, never for serving. Browse the same store in a UI with `make mlflow-ui`
+(<http://127.0.0.1:5000>), where the parent run, the nested candidate runs, their
+parameters and metrics, and the registered model are all visible.
 
 The registry is external state DVC can neither cache nor restore, so the stage outputs
 `artifacts/registry_record.json` — the pipeline's own record of the outcome, readable

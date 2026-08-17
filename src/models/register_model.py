@@ -161,6 +161,7 @@ def build_registry_record(
             "skipped_reason": reason,
             "registered_model_name": name,
             "run_id": run_info.get("run_id"),
+            "tracking_uri": run_info.get("tracking_uri"),
             "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
@@ -171,6 +172,9 @@ def build_registry_record(
         "registered_model_name": name,
         "version": str(version.version),
         "run_id": run_info.get("run_id"),
+        # Which store holds this version. Without it the record names a version number
+        # that could belong to any tracking database on the machine.
+        "tracking_uri": run_info.get("tracking_uri"),
         "champion_model": run_info.get("champion_model"),
         "promoted": promoted,
         "validation_status": PROMOTED_STATUS if promoted else CANDIDATE_STATUS,

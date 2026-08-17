@@ -445,6 +445,32 @@ def test_registry_record_names_the_servable_uri(local_tracker, logged_run) -> No
     assert record["validation_status"] == PROMOTED_STATUS
 
 
+@pytest.mark.parametrize("key", [
+    "registered_model_name", "version", "run_id", "alias", "promoted", "tracking_uri",
+])
+def test_registry_record_carries_the_audit_contract(local_tracker, logged_run, key) -> None:
+    """A version number alone could belong to any tracking store on the machine."""
+    version = register_champion(logged_run, champion_alias="champion",
+                                candidate_alias="candidate")
+    record = build_registry_record(logged_run, version, champion_alias="champion",
+                                   candidate_alias="candidate")
+    assert record[key] is not None
+
+
+def test_a_skip_record_still_names_its_store(tmp_path) -> None:
+    """Even a skip must say which store was checked."""
+    tracker = MLflowTracker(enabled=False, experiment_name="x", tracking_uri="mlruns")
+    with tracker.start_run():
+        info = build_run_information(
+            tracker, model_uri=None, registered_model_name="test-champion",
+            champion_model="XGBoost", promoted=True, optimal_threshold=0.5,
+            test_metrics={},
+        )
+    record = build_registry_record(info, None, champion_alias="champion",
+                                   candidate_alias="candidate")
+    assert "tracking_uri" in record
+
+
 def test_registry_record_points_a_rejected_model_at_the_candidate_alias(
     local_tracker, logged_run,
 ) -> None:
@@ -523,6 +549,46 @@ def test_register_stage_does_not_gate_batch_inference() -> None:
         stages = yaml.safe_load(handle)["stages"]
     predict_deps = " ".join(stages["predict"]["deps"])
     assert "register_model" not in predict_deps
+
+
+# ---------------------------------------------------------------------------
+# The interpreter DVC stages run under
+# ---------------------------------------------------------------------------
+
+def test_train_stage_declares_the_tracking_modules_it_imports() -> None:
+    """Omitting these let DVC call `train` up to date while its outputs came from old code."""
+    import yaml
+
+    with open(PROJECT_ROOT / "dvc.yaml", encoding="utf-8") as handle:
+        deps = yaml.safe_load(handle)["stages"]["train"]["deps"]
+    assert "src/tracking/mlflow_tracker.py" in deps
+    assert "src/models/register_model.py" in deps
+
+
+def test_a_makefile_puts_the_project_venv_on_path() -> None:
+    """DVC stage commands are bare `python`, so PATH decides which interpreter runs them.
+
+    The quiet failure is the one worth a regression test: `validate` and `prepare` run
+    to completion under a system Python and write real outputs, so half a pipeline can be
+    reproduced under the wrong interpreter with nothing to show for it.
+    """
+    makefile = PROJECT_ROOT / "Makefile"
+    assert makefile.exists(), "no Makefile — nothing pins the interpreter DVC stages use"
+    text = makefile.read_text(encoding="utf-8")
+    assert ".venv/bin" in text
+    assert "PATH=" in text
+
+
+def test_the_makefile_hard_codes_no_machine_specific_interpreter() -> None:
+    """An absolute interpreter path would be correct on exactly one machine."""
+    text = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    recipes = [
+        line for line in text.splitlines()
+        if line.startswith("\t") and not line.lstrip().startswith("@echo")
+    ]
+    for line in recipes:
+        assert "/opt/anaconda3" not in line, f"machine-specific interpreter in: {line}"
+        assert "/Users/" not in line, f"machine-specific path in: {line}"
 
 
 def test_registry_config_is_not_a_dvc_train_dependency() -> None:

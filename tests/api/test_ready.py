@@ -48,20 +48,15 @@ def test_a_failed_check_names_itself(registry_stub) -> None:
     assert "alias" in checks["model_loaded"]["detail"]
 
 
-def test_an_invalid_threshold_blocks_readiness(registry_stub) -> None:
+def test_an_invalid_threshold_blocks_readiness(registry_stub, client_factory) -> None:
     """A threshold outside (0, 1) means the artifact cannot decide a class."""
-    from fastapi.testclient import TestClient
-
     from tests.api.conftest import build_metadata
 
     registry_stub["metadata"] = build_metadata(threshold=1.5)
     registry_stub["write_metadata"]()
-    from api.main import app
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        with TestClient(app) as client:
-            response = client.get("/ready")
+    with client_factory() as client:
+        response = client.get("/ready")
     # The Predictor refuses the artifact outright, so the model never loads.
     assert response.status_code == 503
     checks = {c["name"]: c for c in response.json()["checks"]}

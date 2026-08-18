@@ -21,7 +21,7 @@ API_PORT ?= 8000
 PY       := $(VENV_BIN)/python
 DVC_ENV  := PATH="$(VENV_BIN):$$PATH"
 
-.PHONY: help venv-check repro dag status train register register-force explain monitor monitoring-batch monitoring-show predict api api-test test compile mlflow-ui registry-show
+.PHONY: help venv-check repro dag status train register register-force explain monitor monitoring-batch monitoring-show predict api api-test docker-build docker-up docker-down docker-logs docker-ps docker-mlflow docker-health docker-test test compile mlflow-ui registry-show
 
 help:
 	@echo "make venv-check    verify .venv exists and carries the training dependencies"
@@ -38,6 +38,12 @@ help:
 	@echo "make status        show what DVC considers out of date"
 	@echo "make api           serve the champion at $(API_HOST):$(API_PORT)"
 	@echo "make api-test      run the API test suite"
+	@echo "make docker-build  build the serving image"
+	@echo "make docker-up     start the container stack"
+	@echo "make docker-down   stop the container stack"
+	@echo "make docker-logs   follow the API container log"
+	@echo "make docker-health check /health and /ready"
+	@echo "make docker-test   config tests + build-and-run smoke test"
 	@echo "make test          run the unit suite"
 	@echo "make compile       byte-compile src/ and scripts/"
 	@echo "make mlflow-ui     browse runs and the model registry at 127.0.0.1:5000"
@@ -103,6 +109,40 @@ api: venv-check
 
 api-test:
 	"$(PY)" -m pytest tests/api -q
+
+# --- containers ---------------------------------------------------------------------
+# The image holds code; compose supplies the mutable state it reads. None of this is a
+# DVC stage: serving is a deployment concern, not a reproducible batch step.
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d
+	@echo "API      http://127.0.0.1:8000"
+	@echo "Swagger  http://127.0.0.1:8000/docs"
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f api
+
+docker-ps:
+	docker compose ps
+
+# Optional MLflow UI against the same store the API serves from.
+docker-mlflow:
+	docker compose --profile tools up -d mlflow
+	@echo "MLflow   http://127.0.0.1:5000"
+
+docker-health:
+	@printf "/health  "; curl -fsS http://127.0.0.1:8000/health && echo
+	@printf "/ready   "; curl -sS -o /dev/null -w "HTTP %{http_code}\n" http://127.0.0.1:8000/ready
+
+# Static checks that need no Docker daemon, then the full build-and-run smoke test.
+docker-test:
+	"$(PY)" -m pytest tests/docker -q
+	bash scripts/docker_smoke_test.sh
 
 compile:
 	"$(PY)" -m compileall -q src scripts api

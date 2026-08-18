@@ -103,19 +103,14 @@ def test_a_missing_champion_alias_is_503(registry_stub) -> None:
     assert _error(response)["category"] == "model_unavailable"
 
 
-def test_an_unpromoted_model_is_blocked(registry_stub) -> None:
+def test_an_unpromoted_model_is_blocked(registry_stub, client_factory) -> None:
     """A model is unpromoted precisely because it was measured and found wanting."""
-    from fastapi.testclient import TestClient
-
     registry_stub["metadata"] = build_metadata(promoted=False)
     registry_stub["write_metadata"]()
-    from api.main import app
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        with TestClient(app) as client:
-            ready = client.get("/ready")
-            predicted = client.post("/predict", json={"sk_id_curr": APPLICANT_IDS[0]})
+    with client_factory() as client:
+        ready = client.get("/ready")
+        predicted = client.post("/predict", json={"sk_id_curr": APPLICANT_IDS[0]})
     assert ready.status_code == 503
     assert predicted.status_code == 503
     assert _error(predicted)["category"] == "model_unavailable"

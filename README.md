@@ -580,6 +580,145 @@ is **not** a DVC stage — it is a long-running service, not a reproducible batc
 it has no place in the pipeline graph. Docker packaging, CI/CD and cloud deployment are
 future steps and are not implemented.
 
+## Docker
+
+Containerized serving, so the champion can be served without depending on a host Python
+environment.
+
+**Prerequisites:** Docker Desktop (or any Docker engine) running, and a champion already
+registered — the container reads the registry, it never trains or registers.
+
+```bash
+make docker-build      # build the image
+make docker-up         # start the stack, detached
+make docker-health     # check /health and /ready
+make docker-logs       # follow the API log
+make docker-down       # stop
+```
+
+| Service | URL |
+| --- | --- |
+| API | <http://127.0.0.1:8000> |
+| Swagger | <http://127.0.0.1:8000/docs> |
+| Health | <http://127.0.0.1:8000/health> |
+| Readiness | <http://127.0.0.1:8000/ready> |
+| MLflow UI (opt-in) | <http://127.0.0.1:5000> via `make docker-mlflow` |
+
+### What is in the image, and what is not
+
+The image holds **code only**. Every piece of mutable state is mounted at run time, so
+the same image serves a newly trained champion without being rebuilt, and no image is
+ever a snapshot of a particular database.
+
+| Mounted | Mode | Why |
+| --- | --- | --- |
+| `./mlflow.db` | read-only | The registry the champion alias resolves through |
+| `./mlartifacts` | read-only | The champion's serialized files |
+| `./artifacts` | read-only | Deployment metadata: frozen threshold, schema, promotion |
+| `./data/processed/test_features.parquet` | read-only | Feature lookup by `SK_ID_CURR` |
+| `modelium-runtime-state` (named volume) | writable | The container's own rebased registry copy |
+
+### The one thing that needs explaining
+
+MLflow records artifact locations as **absolute paths on the machine that wrote them**.
+On this project the database contains entries like
+`file:///Users/<someone>/.../mlartifacts/models/m-748d…`, which do not exist inside a
+Linux container — so the champion would not load.
+
+`docker/entrypoint.sh` runs `scripts/prepare_container_registry.py` before the API
+starts. It copies the mounted database to a writable location and rewrites the four
+columns that hold paths (`runs.artifact_uri`, `logged_models.artifact_location`,
+`experiments.artifact_location`, `model_versions.storage_location`) onto the container's
+mounts. It never looks for a particular home directory — it finds the `/mlartifacts` or
+`/mlruns` segment and replaces everything before it — so it works whatever machine wrote
+the database. **The host database is opened read-only and never modified.**
+
+This failure is worth knowing about because of how it hides: on the host, a relocated
+store appears to load fine, because MLflow quietly falls back to reading the original
+directory. A container has no such directory, so what looks correct in development fails
+only once containerized.
+
+### Environment variables
+
+Defaults come from `params.yaml`; the container overrides them through the environment,
+so no deployment needs to edit a tracked file.
+
+| Variable | Default in compose |
+| --- | --- |
+| `MODELIUM_API_HOST` / `MODELIUM_API_PORT` | `0.0.0.0` / `8000` |
+| `MODELIUM_MAX_BATCH_SIZE` | `100` |
+| `MODELIUM_MODEL_URI` | `models:/modelium-credit-risk-champion@champion` |
+| `MLFLOW_TRACKING_URI` | `sqlite:////app/runtime/state/mlflow.db` |
+| `MODELIUM_FEATURE_STORE_PATH` | `/app/runtime/data/test_features.parquet` |
+| `MODELIUM_DEPLOYMENT_METADATA_PATH` | `/app/runtime/artifacts/deployment_meta.json` |
+| `MODELIUM_REGISTRY_RECORD_PATH` | `/app/runtime/artifacts/registry_record.json` |
+
+Note the **four slashes** in the SQLite URI. `sqlite:///app/...` is a *relative* path
+called `app`, and MLflow would silently create an empty database with no champion in it.
+
+### Container properties
+
+- Runs as a **non-root** user (`modelium`, uid 1001).
+- Installs `requirements-api.txt`, the **serving subset**. The development manifest pulls
+  DVC, Optuna and CatBoost, none of which the API imports — dropping them took the image
+  from 4.3 GB to 3.4 GB. `xgboost` is kept despite its size (it drags in ~290 MB of CUDA
+  libraries) so an XGBoost champion serves without a rebuild; the API must not assume
+  LightGBM. Keep the two manifests in step when a serving dependency changes.
+- **Multi-stage build**: wheels are compiled in a builder stage, so no compiler toolchain
+  ships in the runtime image.
+- Python **3.13**, matching the interpreter the champion was pickled under — unpickling a
+  fitted sklearn/LightGBM pipeline across minor versions is not guaranteed.
+- `HEALTHCHECK` probes `/health`, never `/predict`: a probe that scores an applicant
+  turns monitoring into load.
+- Resource limits of **4 GB / 2 CPUs** are a laptop-sized starting point, not a measured
+  requirement. Raise them if `/explain` is slow or the container is OOM-killed at start.
+- Serving is **not** a DVC stage. Docker is a deployment concern, not a reproducible
+  batch step.
+
+`/health` is liveness and answers even when the model failed to load; `/ready` is what an
+orchestrator should gate traffic on, and still validates all five checks — model loaded,
+metadata, threshold, schema, champion alias.
+
+### Smoke test
+
+```bash
+bash scripts/docker_smoke_test.sh     # or: make docker-test
+```
+
+Builds, starts, waits for health and readiness, checks `/model/info` carries a promoted
+champion with a non-0.5 threshold, scores applicant `100001`, verifies the class follows
+the frozen threshold, checks the 404 and 422 contracts, and tears the stack down on any
+exit path. It deliberately asserts **no exact probability** — that would tie the test to
+one trained artifact.
+
+### Troubleshooting
+
+| Symptom | Cause and check |
+| --- | --- |
+| Container exits at start | The entrypoint failed to resolve the champion. `docker compose logs api` names the missing mount |
+| `alias 'champion' does not resolve` | No promoted champion registered. Run `make register` on the host first |
+| `No MLflow database at /app/runtime/mlflow.db` | `mlflow.db` missing from the repo root — run the pipeline before serving |
+| `artifacts are not readable` | The `mlartifacts` mount is missing or empty |
+| `/ready` returns 503 | `curl -s localhost:8000/ready` — each of the five checks reports its own reason |
+| Applicant returns 404 | The feature-store parquet is not mounted, or that id is not in it |
+| Permission denied | Something is writing outside `/app/runtime/state`; only that volume is writable |
+| Port already in use | `lsof -ti :8000` — a local `make api` may still be running |
+| Slow first request | Cold start loads a large pipeline; the healthcheck allows 90s before failing |
+| Apple Silicon | The image builds natively for arm64; no `platform:` override is needed |
+
+```bash
+docker compose ps                  # service state and health
+docker compose logs api            # startup and per-request logs
+docker inspect modelium-api        # full container configuration
+curl -s localhost:8000/ready       # which readiness check is failing
+```
+
+### Limitations
+
+Local containerization only. There is still **no authentication**, no rate limiting and
+no TLS, so this is not safe to expose publicly. CI/CD, Kubernetes and cloud deployment
+are not implemented.
+
 ### params.yaml
 
 `params.yaml` is the single source of truth for experiment configuration — split sizes, seed, IQR
@@ -653,6 +792,7 @@ modelium/
 - SHAP explainability — global importance and per-applicant explanations
 - Offline batch monitoring — data drift, prediction drift, performance, fairness
 - FastAPI serving of the registered champion (local)
+- Docker containerization of the serving API
 
 **Not yet implemented**
 

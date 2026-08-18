@@ -1,0 +1,53 @@
+# Build context control. The repository is ~3 GB with raw data and DVC cache; the image
+# needs the source and nothing else. Mutable runtime state (mlflow.db, mlartifacts,
+# artifacts, the feature store) is deliberately excluded and mounted at run time instead,
+# so the image stays immutable and does not carry a snapshot of a database.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+# Environments and caches
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.ipynb_checkpoints
+
+# Data. 2.5 GB of raw CSVs and the processed parquets — the feature store is mounted.
+data
+!data/monitoring/.gitkeep
+
+# DVC internals and cache
+.dvc/cache
+.dvc/tmp
+
+# Mutable MLflow state — mounted, never baked in
+mlflow.db
+mlflow.db-journal
+mlruns
+mlartifacts
+
+# Generated outputs
+artifacts
+reports
+logs
+models
+notebooks
+
+# Tests are not shipped in a runtime image
+tests
+sprints
+
+# Local noise
+.DS_Store
+**/.DS_Store
+*.log
+*.swp
+.idea
+.vscode

@@ -1,0 +1,108 @@
+# Local container stack for the Modelium credit-risk API.
+#
+# The image holds code; this file supplies state. Every mount below is a piece of the
+# pipeline's output that the service reads at run time, so the same image can serve a
+# newly trained champion without being rebuilt.
+#
+# Mounts are read-only wherever the service only reads. The one exception is the MLflow
+# database, which is mounted read-only too — the entrypoint copies it to a writable
+# location inside the container before rebasing it, so the host's store is never modified
+# by running a container against it.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: modelium-api:latest
+    container_name: modelium-api
+    ports:
+      - "8000:8000"
+    environment:
+      MODELIUM_API_HOST: "0.0.0.0"
+      MODELIUM_API_PORT: "8000"
+      MODELIUM_API_LOG_LEVEL: "INFO"
+      MODELIUM_MAX_BATCH_SIZE: "100"
+      MODELIUM_MODEL_URI: "models:/modelium-credit-risk-champion@champion"
+      # Four slashes: sqlite:// is the scheme, and the fourth slash begins an ABSOLUTE
+      # path. sqlite:///app/... would be a *relative* path called "app" and would silently
+      # create an empty database with no champion in it.
+      MLFLOW_TRACKING_URI: "sqlite:////app/runtime/state/mlflow.db"
+      MODELIUM_MLFLOW_SOURCE_DB: "/app/runtime/mlflow.db"
+      MODELIUM_MLFLOW_RUNTIME_DB: "/app/runtime/state/mlflow.db"
+      # Read-only mount in, writable copy out. Resolving an alias makes MLflow write a
+      # registered_model_meta file into the model's directory, which a read-only mount
+      # refuses — so the container works on its own copy and the host store stays pristine.
+      MODELIUM_MLARTIFACTS_SOURCE: "/app/runtime/mlartifacts"
+      MODELIUM_MLARTIFACTS_ROOT: "/app/runtime/state/mlartifacts"
+      MODELIUM_MLRUNS_ROOT: "/app/runtime/mlruns"
+      MODELIUM_FEATURE_STORE_PATH: "/app/runtime/data/test_features.parquet"
+      MODELIUM_DEPLOYMENT_METADATA_PATH: "/app/runtime/artifacts/deployment_meta.json"
+      MODELIUM_REGISTRY_RECORD_PATH: "/app/runtime/artifacts/registry_record.json"
+    volumes:
+      # Registry metadata and the champion's files. Read-only: the API reads the registry,
+      # it never registers, promotes or moves an alias.
+      - ./mlflow.db:/app/runtime/mlflow.db:ro
+      - ./mlartifacts:/app/runtime/mlartifacts:ro
+      - ./artifacts:/app/runtime/artifacts:ro
+      # Precomputed engineered features for SK_ID_CURR lookup. A single file rather than
+      # the whole data directory, which is ~3 GB.
+      - ./data/processed/test_features.parquet:/app/runtime/data/test_features.parquet:ro
+      # The only writable volume: the rebased copy of the registry the entrypoint builds.
+      - modelium-runtime-state:/app/runtime/state
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      # Generous: the champion is a large pickled pipeline and the feature store is
+      # ~48k rows, so a cold start is seconds, not milliseconds.
+      start_period: 90s
+      retries: 3
+    # `unless-stopped` rather than `always`: a deliberate `docker compose stop` should
+    # stay stopped rather than being resurrected on the next daemon restart.
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # Sized for a laptop. The pipeline plus SHAP needs comfortably more than 2 GB;
+          # 4 GB leaves headroom for a batch request. Raise both if /explain is slow or
+          # the container is OOM-killed on start — these are starting points, not
+          # measured requirements.
+          memory: 4G
+          cpus: "2.0"
+        reservations:
+          memory: 1G
+
+  # Optional: browse the same registry the API serves from. Started only with
+  # `docker compose --profile tools up`, because the API does not need it.
+  #
+  # It mounts the SAME database and artifact root as the API's entrypoint writes, so both
+  # read one store. Pointing it at a separate database would show a registry that has
+  # nothing to do with what is being served.
+  mlflow:
+    image: modelium-api:latest
+    container_name: modelium-mlflow
+    profiles: ["tools"]
+    depends_on:
+      - api
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_TRACKING_URI: "sqlite:////app/runtime/state/mlflow.db"
+    volumes:
+      - modelium-runtime-state:/app/runtime/state
+    entrypoint: ["mlflow"]
+    command:
+      - server
+      - --backend-store-uri
+      - sqlite:////app/runtime/state/mlflow.db
+      - --default-artifact-root
+      - /app/runtime/state/mlartifacts
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "5000"
+    restart: unless-stopped
+
+volumes:
+  modelium-runtime-state:

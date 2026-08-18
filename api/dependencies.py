@@ -107,10 +107,13 @@ def load_model_state(settings: ApiSettings) -> ModelState:
         )
         from src.inference.predictor import Predictor
 
-        if not DEPLOYMENT_META_FILE.exists():
+        metadata_path = getattr(settings, "deployment_metadata_path", None) \
+            or DEPLOYMENT_META_FILE
+        if not Path(metadata_path).exists():
             raise FileNotFoundError(
-                "deployment metadata is missing; run the train stage")
-        metadata = json.loads(DEPLOYMENT_META_FILE.read_text(encoding="utf-8"))
+                f"deployment metadata is missing at {metadata_path}; run the train "
+                f"stage, or mount artifacts/ if running in a container")
+        metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
 
         pipeline, registry_info = load_champion_from_registry(
             settings.registered_model_name, settings.champion_alias,

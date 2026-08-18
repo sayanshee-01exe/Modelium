@@ -19,6 +19,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 ENV_PREFIX = "MODELIUM_API_"
 
+# Flat aliases the container contract uses, mapped to the setting they override. Both
+# `MODELIUM_API_MODEL_URI` and `MODELIUM_MODEL_URI` work: the prefixed form groups the
+# service's own knobs, and the flat form is what the compose file and the deployment
+# documentation use. `MLFLOW_TRACKING_URI` is MLflow's own standard variable, honoured so
+# the container does not need a project-specific name for a thing that already has one.
+ENV_ALIASES = {
+    "model_uri": ("MODELIUM_MODEL_URI",),
+    "feature_store_path": ("MODELIUM_FEATURE_STORE_PATH",),
+    "max_batch_size": ("MODELIUM_MAX_BATCH_SIZE",),
+    "deployment_metadata_path": ("MODELIUM_DEPLOYMENT_METADATA_PATH",),
+    "registry_record_path": ("MODELIUM_REGISTRY_RECORD_PATH",),
+    "log_level": ("MODELIUM_LOG_LEVEL",),
+}
+
 # Defaults used only if params.yaml cannot be read — a missing config file should not
 # stop the service from starting and reporting itself unhealthy in a readable way.
 FALLBACK = {
@@ -27,6 +41,8 @@ FALLBACK = {
     "max_batch_size": 100,
     "model_uri": "models:/modelium-credit-risk-champion@champion",
     "feature_store_path": "data/processed/test_features.parquet",
+    "deployment_metadata_path": "artifacts/deployment_meta.json",
+    "registry_record_path": "artifacts/registry_record.json",
     "max_explain_rows": 1,
     "explain_top_n": 10,
     "log_level": "INFO",
@@ -42,6 +58,8 @@ class ApiSettings:
     max_batch_size: int
     model_uri: str
     feature_store_path: Path
+    deployment_metadata_path: Path
+    registry_record_path: Path
     max_explain_rows: int
     explain_top_n: int
     log_level: str
@@ -66,7 +84,15 @@ class ApiSettings:
 
 
 def _env(key: str) -> str | None:
-    return os.environ.get(f"{ENV_PREFIX}{key.upper()}")
+    """The prefixed variable, then any flat alias, then nothing."""
+    value = os.environ.get(f"{ENV_PREFIX}{key.upper()}")
+    if value:
+        return value
+    for alias in ENV_ALIASES.get(key, ()):
+        value = os.environ.get(alias)
+        if value:
+            return value
+    return None
 
 
 def _resolve_path(value: str) -> Path:
@@ -105,7 +131,8 @@ def load_settings() -> ApiSettings:
         # container that exits immediately.
         pass
 
-    for key in ("host", "model_uri", "feature_store_path", "log_level"):
+    for key in ("host", "model_uri", "feature_store_path", "log_level",
+                "deployment_metadata_path", "registry_record_path"):
         override = _env(key)
         if override:
             api_section[key] = override
@@ -119,7 +146,9 @@ def load_settings() -> ApiSettings:
 
     # The tracking store is anchored the same way the pipeline anchors it, so the API
     # and the stages cannot end up reading different databases.
-    tracking_uri = registry["tracking_uri"]
+    # MLflow's own variable wins: a container that sets MLFLOW_TRACKING_URI expects
+    # every MLflow client in the process to honour it, including this one.
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or registry["tracking_uri"]
     try:
         from src.tracking.mlflow_tracker import MLflowTracker
 
@@ -133,6 +162,9 @@ def load_settings() -> ApiSettings:
         max_batch_size=int(api_section["max_batch_size"]),
         model_uri=str(api_section["model_uri"]),
         feature_store_path=_resolve_path(str(api_section["feature_store_path"])),
+        deployment_metadata_path=_resolve_path(
+            str(api_section["deployment_metadata_path"])),
+        registry_record_path=_resolve_path(str(api_section["registry_record_path"])),
         max_explain_rows=int(api_section["max_explain_rows"]),
         explain_top_n=int(api_section["explain_top_n"]),
         log_level=str(api_section["log_level"]).upper(),

@@ -481,3 +481,129 @@ stages:
       hash: md5
       md5: 3a9cc133074b4d0a5c4ebd7689573259
       size: 177576
+  monitor:
+    cmd: python scripts/monitor.py
+    deps:
+    - path: artifacts/deployment_meta.json
+      hash: md5
+      md5: 9e7d029717b7cfef9bfd048aa503bb25
+      size: 48553
+    - path: artifacts/registry_record.json
+      hash: md5
+      md5: a96c0c854e6282f4a208d6434794849f
+      size: 885
+    - path: config/config.py
+      hash: md5
+      md5: fdc274fb45a4cf2a1c0877b8c00d548c
+      size: 2978
+    - path: data/monitoring/current_batch.parquet
+      hash: md5
+      md5: f90b87e5884cfeddf3ef45010dcfac9f
+      size: 9732734
+    - path: data/processed/train_features.parquet
+      hash: md5
+      md5: 8fac3f9128d1fe638ce5f412be5d31d2
+      size: 160407154
+    - path: scripts/monitor.py
+      hash: md5
+      md5: 1de72f15090f10a5bbedfc00e2c2924c
+      size: 18997
+    - path: src/data/data_preparation.py
+      hash: md5
+      md5: 39f461d1ca860f709b0b53a9ae2bd387
+      size: 6141
+    - path: src/explainability/shap_explainer.py
+      hash: md5
+      md5: 1eae2a996902a29a36fd8d9a7725a0fc
+      size: 31875
+    - path: src/monitoring/data_drift.py
+      hash: md5
+      md5: f63977c1cb18f2781a782db89947660c
+      size: 16352
+    - path: src/monitoring/fairness_monitor.py
+      hash: md5
+      md5: 188040fb86c02231ce6eccaa7e4e3084
+      size: 9197
+    - path: src/monitoring/performance_monitor.py
+      hash: md5
+      md5: 8c7ae60a6c992677d74bfd9b9e13857c
+      size: 8414
+    - path: src/monitoring/prediction_drift.py
+      hash: md5
+      md5: 11eacbaa26ebaa592e7bdf284a7817a8
+      size: 5884
+    - path: src/monitoring/reporting.py
+      hash: md5
+      md5: 421dfcecacf3a9b3606d15ee8acb5d42
+      size: 19333
+    - path: src/utils/config_loader.py
+      hash: md5
+      md5: a927a49fa38b0d2ada84f50e511f4ef1
+      size: 13604
+    params:
+      params.yaml:
+        data:
+          validation_size: 0.15
+          test_size: 0.15
+          random_state: 42
+        mlflow:
+          enabled: true
+          experiment_name: modelium-credit-risk
+          tracking_uri: sqlite:///mlflow.db
+          registered_model_name: modelium-credit-risk-champion
+          champion_alias: champion
+          candidate_alias: candidate
+        monitoring:
+          enabled: true
+          reference_sample_size: 10000
+          current_sample_size: 10000
+          random_state: 42
+          drift:
+            psi_warning_threshold: 0.1
+            psi_critical_threshold: 0.25
+            ks_pvalue_threshold: 0.05
+            max_drifted_feature_ratio: 0.2
+          prediction:
+            mean_probability_change_threshold: 0.05
+            positive_rate_change_threshold: 0.05
+          performance:
+            min_average_precision: 0.15
+            min_roc_auc: 0.65
+            min_recall: 0.35
+            min_precision: 0.2
+            min_f1: 0.25
+          fairness:
+            enabled: true
+            minimum_group_size: 100
+            max_demographic_parity_difference: 0.1
+            max_equal_opportunity_difference: 0.1
+    outs:
+    - path: artifacts/monitoring/fairness_metrics.csv
+      hash: md5
+      md5: 8127288a41b9e1983fe3fa9d31c13a63
+      size: 3383
+    - path: artifacts/monitoring/feature_drift.csv
+      hash: md5
+      md5: 8a1889b436f82845b14283604b9a20d5
+      size: 101144
+    - path: artifacts/monitoring/monitoring_report.md
+      hash: md5
+      md5: 5a94c186e387ce121e13164d6601adc8
+      size: 5213
+    - path: artifacts/monitoring/monitoring_summary.json
+      hash: md5
+      md5: 9f77350785b5bfdd277784d65eaf594e
+      size: 2555
+    - path: artifacts/monitoring/performance_metrics.json
+      hash: md5
+      md5: 18dcfe90aae8252a4ea7a55d143b67e5
+      size: 2103
+    - path: artifacts/monitoring/prediction_drift.json
+      hash: md5
+      md5: 49fee46f853241030970ec9877e68481
+      size: 1568
+    - path: reports/figures/monitoring
+      hash: md5
+      md5: e6f8b83f821993875bfe2168d0a73fd0.dir
+      size: 286803
+      nfiles: 4

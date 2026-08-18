@@ -135,3 +135,55 @@ explainability:
   # five riskiest — extremes, the threshold boundary, and a true positive / false
   # negative where labels allow.
   local_examples: 5
+
+# Offline batch monitoring. Reads the registered champion and two stored batches — it
+# never fits, retrains, registers a version or moves an alias.
+#
+# Every threshold below is a configurable STARTING VALUE, not a validated production
+# limit. The PSI levels are the conventional 0.10/0.25 rule of thumb; the performance
+# floors are the same ones `selection` and `threshold` already gate promotion on, so a
+# batch that would fail monitoring would also have failed promotion. Calibrate them
+# against observed run-to-run variation before treating an alert as actionable.
+monitoring:
+  enabled: true
+  # Rows sampled from each side. Drift statistics are stable well below the full
+  # 215k/46k splits, and the pairwise KS test is the expensive part.
+  reference_sample_size: 10000
+  current_sample_size: 10000
+  random_state: 42
+
+  drift:
+    # Conventional PSI bands: < 0.10 stable, 0.10-0.25 worth a look, > 0.25 material.
+    psi_warning_threshold: 0.10
+    psi_critical_threshold: 0.25
+    # Secondary signal only. At 10k rows per side KS rejects equality for differences
+    # far too small to matter, so it can raise a warning but never a critical on its own.
+    ks_pvalue_threshold: 0.05
+    # Share of features allowed to be drifted before the batch as a whole is critical,
+    # however mild each individual move is.
+    max_drifted_feature_ratio: 0.20
+
+  prediction:
+    # Absolute moves in the score distribution, measured at the frozen threshold.
+    mean_probability_change_threshold: 0.05
+    positive_rate_change_threshold: 0.05
+
+  # Floors, applied only when the batch carries observed outcomes. These mirror the
+  # promotion gates in `selection` and `threshold` rather than inventing stricter ones.
+  performance:
+    min_average_precision: 0.15
+    min_roc_auc: 0.65
+    min_recall: 0.35
+    min_precision: 0.20
+    min_f1: 0.25
+
+  # Technical demonstration of disparity measurement. The grouping columns are
+  # self-reported application fields, NOT verified protected attributes, and these
+  # metrics establish no legal compliance. See src/monitoring/fairness_monitor.py.
+  fairness:
+    enabled: true
+    # Groups below this are reported as insufficient_data, never merged into another
+    # group to reach the threshold.
+    minimum_group_size: 100
+    max_demographic_parity_difference: 0.10
+    max_equal_opportunity_difference: 0.10

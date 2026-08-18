@@ -24,11 +24,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 DVC_FILE = PROJECT_ROOT / "dvc.yaml"
-STAGE_ORDER = ("validate", "prepare", "train", "register", "explain", "predict")
+STAGE_ORDER = ("validate", "prepare", "train", "register", "explain", "monitor",
+               "predict")
 
 # Stages that cost real time or produce the model. The invariants about what may
-# invalidate a stage are only interesting for these — `register` costs a second, so
-# re-running it is not the accident the others would be.
+# invalidate a stage are only interesting for these — `register`, `explain` and
+# `monitor` cost seconds to a minute, so re-running one is not the accident a
+# re-triggered `train` would be.
 EXPENSIVE_STAGES = ("validate", "prepare", "train", "predict")
 
 
@@ -154,18 +156,19 @@ def test_no_expensive_stage_depends_on_tracking_configuration(stages) -> None:
 
 def test_only_the_registry_stages_consume_tracking_configuration(stages) -> None:
     """A section no stage declares is a claim DVC does not honour — but the set of
-    legitimate consumers is exactly the two stages that talk to the registry.
+    legitimate consumers is exactly the stages that resolve the champion by alias.
 
-    Widened from {register} when `explain` arrived: it resolves the champion through
-    `mlflow.registered_model_name` and `mlflow.champion_alias`, so renaming either must
-    re-run the explanation. Both stages cost seconds; the rule that matters is the
-    separate one below, that no *expensive* stage reads this section.
+    Grown from {register} to {register, explain} to {register, explain, monitor} as each
+    arrived. Every one of them reads `mlflow.registered_model_name` and
+    `mlflow.champion_alias`, so renaming either must re-run them; all three cost seconds
+    to a minute. The rule that matters is the separate one above — that no *expensive*
+    stage reads this section, so switching tracking off cannot discard a multi-hour run.
     """
     from src.utils.config_loader import TRACKING_SECTIONS
 
     consumers = {name for name, stage in stages.items()
                  if not set(TRACKING_SECTIONS).isdisjoint(stage.get("params", []))}
-    assert consumers == {"register", "explain"}
+    assert consumers == {"register", "explain", "monitor"}
 
 
 def test_parameter_free_stages_declare_no_params(stages) -> None:

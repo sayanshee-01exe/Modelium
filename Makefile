@@ -17,7 +17,7 @@ VENV_BIN := $(CURDIR)/.venv/bin
 PY       := $(VENV_BIN)/python
 DVC_ENV  := PATH="$(VENV_BIN):$$PATH"
 
-.PHONY: help venv-check repro dag status train register register-force explain predict test compile mlflow-ui registry-show
+.PHONY: help venv-check repro dag status train register register-force explain monitor monitoring-batch monitoring-show predict test compile mlflow-ui registry-show
 
 help:
 	@echo "make venv-check    verify .venv exists and carries the training dependencies"
@@ -26,6 +26,9 @@ help:
 	@echo "make register      reproduce the register stage only"
 	@echo "make register-force  re-register an unchanged run (safe single-stage force)"
 	@echo "make explain       SHAP explanations for the registered champion"
+	@echo "make monitor       offline batch monitoring for the champion"
+	@echo "make monitoring-batch  rebuild the demonstration current batch"
+	@echo "make monitoring-show   print the last monitoring summary"
 	@echo "make predict       reproduce the predict stage only"
 	@echo "make dag           show the stage graph"
 	@echo "make status        show what DVC considers out of date"
@@ -63,6 +66,17 @@ register-force: venv-check
 
 explain: venv-check
 	$(DVC_ENV) "$(VENV_BIN)/dvc" repro explain
+
+monitor: venv-check
+	$(DVC_ENV) "$(VENV_BIN)/dvc" repro monitor
+
+# Rebuild the demonstration batch the monitor stage reads. Not a DVC stage: it is a
+# stand-in for production traffic this project does not have, so it is run deliberately.
+monitoring-batch: venv-check
+	"$(PY)" scripts/create_monitoring_batch.py --drift
+
+monitoring-show:
+	@"$(PY)" scripts/show_monitoring.py
 
 predict: venv-check
 	$(DVC_ENV) "$(VENV_BIN)/dvc" repro predict

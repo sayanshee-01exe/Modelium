@@ -180,3 +180,52 @@ stages:
       # plots instead of leaving them to be mistaken for current ones.
       - reports/figures/shap_local:
           cache: false
+
+  # Offline batch monitoring: drift, prediction drift, performance where labels exist,
+  # and group disparities. Inference-only — it loads the registered champion and calls
+  # predict_proba, and never fits, retrains, registers a version or moves an alias.
+  #
+  # Ordered after `register` by depending on that stage's record, for the same reason
+  # `explain` does: the alias is what it resolves, and mlflow.db is a large binary
+  # rewritten by every run, which would be a useless dependency hash.
+  monitor:
+    cmd: python scripts/monitor.py
+    deps:
+      - scripts/monitor.py
+      - src/monitoring/data_drift.py
+      - src/monitoring/prediction_drift.py
+      - src/monitoring/performance_monitor.py
+      - src/monitoring/fairness_monitor.py
+      - src/monitoring/reporting.py
+      - src/explainability/shap_explainer.py
+      - src/data/data_preparation.py
+      - src/utils/config_loader.py
+      - config/config.py
+      - artifacts/registry_record.json
+      - artifacts/deployment_meta.json
+      - data/processed/train_features.parquet
+      - data/monitoring/current_batch.parquet
+    params:
+      - monitoring
+      - data
+      - mlflow
+    outs:
+      - artifacts/monitoring/feature_drift.csv:
+          cache: false
+      - artifacts/monitoring/prediction_drift.json:
+          cache: false
+      # Written on both paths. With no labels it carries labels_available: false rather
+      # than metrics, so the stage contract holds in either mode.
+      - artifacts/monitoring/performance_metrics.json:
+          cache: false
+      - artifacts/monitoring/fairness_metrics.csv:
+          cache: false
+      - artifacts/monitoring/monitoring_summary.json:
+          cache: false
+      - artifacts/monitoring/monitoring_report.md:
+          cache: false
+      # Its own directory: plots are skipped when there is nothing to draw, so the set
+      # of files varies between runs. Never reports/figures itself, which is git-tracked
+      # scaffolding DVC would take ownership of and prune.
+      - reports/figures/monitoring:
+          cache: false

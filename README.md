@@ -49,7 +49,8 @@ Batch Inference
 DVC DAG:
 
 ```text
-validate → prepare → train ─┬→ register → explain
+validate → prepare → train ─┬→ register ─┬→ explain
+                            │             └→ monitor
                             └→ predict
 ```
 
@@ -407,6 +408,87 @@ Artifacts are also logged to a dedicated MLflow run tagged with `source_run_id`,
 `registered_model_name`, `model_alias` and `model_version`, rather than appended to the
 training run, so the historical model record is not disturbed.
 
+## Monitoring
+
+**Offline batch monitoring.** The stage compares one stored current batch against one
+stored reference batch when it is run. There is no live traffic, no streaming and no
+continuous evaluation — calling it production monitoring would overstate what it does.
+
+```bash
+make monitoring-batch   # rebuild the demonstration batch
+make monitor            # or: dvc repro monitor
+make monitoring-show    # print the last run's status
+```
+
+The model is the registry's approved champion, resolved through
+`models:/modelium-credit-risk-champion@champion`. The stage calls `predict_proba` and
+`transform` only — it never fits, retrains, registers a version, moves an alias, promotes
+or rolls back. It reports, and stops there.
+
+| Batch | What it is |
+| --- | --- |
+| Reference | A deterministic sample of the **training split** — the distribution the champion was fitted on |
+| Current | `data/monitoring/current_batch.parquet`, built by `scripts/create_monitoring_batch.py` |
+
+**The current batch is a demonstration.** This project has no production traffic, so the
+script manufactures one from the held-out test split and marks it as manufactured: the
+rows and labels are genuine and unseen, but any drift is injected, and the affected
+feature names are written into the batch metadata and reproduced in the report. The
+labels are recorded as `label_source: held_out_test_split`, never as observed production
+outcomes.
+
+### What it measures
+
+| Section | Measures |
+| --- | --- |
+| Feature drift | PSI, KS statistic and p-value, Jensen-Shannon distance, missing-rate change per feature; unseen-category rate for categoricals |
+| Prediction drift | Mean/median/std probability, positive rate, probability PSI — all at the **frozen threshold**, never 0.5 |
+| Performance | AP, ROC-AUC, accuracy, precision, recall, F1, confusion matrix, FPR/FNR — **only when labels exist** |
+| Fairness | Per-group rates and disparities across applicant segments |
+
+Two behaviours are worth knowing:
+
+**Labels are optional, and their absence is reported rather than filled in.** In credit
+risk a default is observed months after scoring, so a batch usually has none. Without
+them the stage still measures drift and prediction-only fairness, and records
+`labels_available: false` with no metrics at all — a plausible Average Precision computed
+without outcomes would be the most damaging thing it could produce.
+
+**A significance test alone cannot flag a feature.** At 10,000 rows per side the KS
+p-value rejects equality for differences far too small to act on — on a real run it alone
+flagged nine features whose largest CDF gap was under 0.05. The KS statistic is the
+effect size, so both are required.
+
+### Outputs
+
+```text
+artifacts/monitoring/feature_drift.csv           one row per feature, worst first
+artifacts/monitoring/prediction_drift.json       score distribution comparison
+artifacts/monitoring/performance_metrics.json    metrics, or labels_available: false
+artifacts/monitoring/fairness_metrics.csv        per-group rates and disparities
+artifacts/monitoring/monitoring_summary.json     machine-readable status
+artifacts/monitoring/monitoring_report.md        the written report
+reports/figures/monitoring/*.png                 drift, prediction, missing-rate, group plots
+```
+
+`overall_status` is the **worst** section status, and every section status is carried
+alongside it. A single green headline that absorbed a red section would be worse than no
+headline, since it is the one line an operator reads.
+
+### Fairness scope
+
+The fairness figures are a **technical demonstration** of disparity measurement on a
+public research dataset, not a legal compliance assessment. `CODE_GENDER`,
+`NAME_FAMILY_STATUS`, `NAME_EDUCATION_TYPE` and `NAME_INCOME_TYPE` are self-reported
+application fields, not verified protected attributes; a disparity can arise from the
+population, the sample or the model, and these metrics cannot separate those causes.
+Groups below `minimum_group_size` are reported as `insufficient_data` and never merged
+into another group to reach the threshold.
+
+Each run is also logged to a dedicated MLflow run tagged `monitoring_run=true` and linked
+to the champion by `source_training_run_id`, `model_version` and `model_alias`. The
+training run's own metrics are never modified.
+
 ### params.yaml
 
 `params.yaml` is the single source of truth for experiment configuration — split sizes, seed, IQR
@@ -443,7 +525,7 @@ modelium/
 │   ├── inference/                # Predictor
 │   ├── tracking/                 # MLflow experiment tracking
 │   ├── explainability/           # SHAP global + local explanations
-│   ├── monitoring/               # drift / fairness scaffolding (not wired in)
+│   ├── monitoring/               # drift, prediction drift, performance, fairness
 │   ├── visualization/
 │   └── utils/                    # config loader, logger, exceptions
 ├── scripts/
@@ -452,7 +534,8 @@ modelium/
 │   ├── train.py                  # DVC stage 3
 │   ├── register_model.py         # DVC stage 4
 │   ├── explain.py                # DVC stage 5
-│   └── predict.py                # DVC stage 6
+│   ├── monitor.py                # DVC stage 6
+│   └── predict.py                # DVC stage 7
 ├── tests/unit/
 ├── artifacts/                    # metrics, deployment metadata, run/registry records,
 │                                 #   predictions (gitignored)
@@ -477,6 +560,7 @@ modelium/
 - MLflow experiment tracking (local)
 - MLflow Model Registry with promotion-gated aliases (local)
 - SHAP explainability — global importance and per-applicant explanations
+- Offline batch monitoring — data drift, prediction drift, performance, fairness
 
 **Not yet implemented**
 
@@ -487,5 +571,4 @@ modelium/
 - CI/CD
 - AWS deployment
 
-`src/monitoring/` contains scaffolding from an earlier iteration and is not part of the
-pipeline.
+Every module under `src/` is now referenced by a pipeline stage.

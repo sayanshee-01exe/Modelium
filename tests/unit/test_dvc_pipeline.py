@@ -24,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 DVC_FILE = PROJECT_ROOT / "dvc.yaml"
-STAGE_ORDER = ("validate", "prepare", "train", "register", "predict")
+STAGE_ORDER = ("validate", "prepare", "train", "register", "explain", "predict")
 
 # Stages that cost real time or produce the model. The invariants about what may
 # invalidate a stage are only interesting for these — `register` costs a second, so
@@ -152,13 +152,20 @@ def test_no_expensive_stage_depends_on_tracking_configuration(stages) -> None:
             f"{name} would re-run when tracking config changes"
 
 
-def test_the_register_stage_is_the_only_consumer_of_tracking_configuration(stages) -> None:
-    """A section no stage declares is a claim DVC does not honour."""
+def test_only_the_registry_stages_consume_tracking_configuration(stages) -> None:
+    """A section no stage declares is a claim DVC does not honour — but the set of
+    legitimate consumers is exactly the two stages that talk to the registry.
+
+    Widened from {register} when `explain` arrived: it resolves the champion through
+    `mlflow.registered_model_name` and `mlflow.champion_alias`, so renaming either must
+    re-run the explanation. Both stages cost seconds; the rule that matters is the
+    separate one below, that no *expensive* stage reads this section.
+    """
     from src.utils.config_loader import TRACKING_SECTIONS
 
     consumers = {name for name, stage in stages.items()
                  if not set(TRACKING_SECTIONS).isdisjoint(stage.get("params", []))}
-    assert consumers == {"register"}
+    assert consumers == {"register", "explain"}
 
 
 def test_parameter_free_stages_declare_no_params(stages) -> None:

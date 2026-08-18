@@ -136,3 +136,47 @@ stages:
       - data/processed/test_features.parquet
     outs:
       - artifacts/predictions/test_predictions.csv
+
+  # SHAP explanations for the model the registry says is approved. Inference-only: it
+  # loads the champion through its alias, transforms with the already-fitted
+  # preprocessor, and fits nothing — so re-running it can never change the model.
+  #
+  # Depends on the register stage's record rather than on mlflow.db. The database is
+  # large, binary and rewritten by every run, which would make it a useless dependency
+  # hash; registry_record.json changes exactly when the registered version does, and
+  # depending on it is also what orders this stage after `register`.
+  explain:
+    cmd: python scripts/explain.py
+    deps:
+      - scripts/explain.py
+      - src/explainability/shap_explainer.py
+      - src/features/data_preprocessing.py
+      - src/data/data_preparation.py
+      - src/utils/config_loader.py
+      - config/config.py
+      - artifacts/registry_record.json
+      - artifacts/deployment_meta.json
+      - data/processed/train_features.parquet
+    params:
+      - explainability
+      - data
+      - mlflow
+    outs:
+      - artifacts/explainability/global_feature_importance.csv:
+          cache: false
+      - artifacts/explainability/local_explanations.json:
+          cache: false
+      - artifacts/explainability/explanation_report.json:
+          cache: false
+      - reports/figures/shap_summary.png:
+          cache: false
+      - reports/figures/shap_bar.png:
+          cache: false
+      # A directory, because the per-applicant filenames carry their SK_ID_CURR and
+      # cannot be enumerated ahead of the run. Its own subdirectory rather than
+      # reports/figures itself: DVC takes ownership of a declared directory and deletes
+      # what it did not write, which removed the git-tracked reports/figures/.gitkeep.
+      # Owning a subdirectory also means a sample change cleans up the previous run's
+      # plots instead of leaving them to be mistaken for current ones.
+      - reports/figures/shap_local:
+          cache: false

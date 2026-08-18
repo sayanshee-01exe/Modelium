@@ -40,6 +40,8 @@ Final Test Evaluation   test read exactly once
 Champion Pipeline       preprocessing + model, one artifact
         ↓
         ├──→ Model Registry   versioned, aliased by promotion status
+        │            ↓
+        │       SHAP Explanations   global importance + per-applicant
         ↓
 Batch Inference
 ```
@@ -47,12 +49,13 @@ Batch Inference
 DVC DAG:
 
 ```text
-validate → prepare → train ─┬→ register
+validate → prepare → train ─┬→ register → explain
                             └→ predict
 ```
 
-`register` is a leaf, not a link in the chain. Batch scoring loads the local champion
-artifact, so a registry outage cannot stop the pipeline producing predictions.
+Neither `register` nor `explain` sits upstream of `predict`. Batch scoring loads the local
+champion artifact, so a registry outage cannot stop the pipeline producing predictions,
+and an explanation is never a prerequisite for a score.
 
 ---
 
@@ -347,6 +350,63 @@ register; the stage records the skip and succeeds rather than failing the pipeli
 The store is the same local SQLite database used for tracking. There is no remote
 tracking server.
 
+## Explainability
+
+The model explained is the one the **registry** says is approved — resolved through
+`models:/modelium-credit-risk-champion@champion`, never read from whichever joblib is on
+disk. A report about a model nobody is serving is worse than no report.
+
+The stage is inference-only. The champion arrives as a fitted pipeline; SHAP needs the
+transformed matrix and the estimator separately, so the preprocessor is used via
+`transform` and the estimator is explained directly. Nothing calls `fit` — refitting
+preprocessing on the explanation sample would describe a transformation the model was
+never trained with.
+
+```bash
+make explain            # or: dvc repro explain
+```
+
+**What gets explained.** A deterministic sample (`explainability.sample_size`, seed
+`random_state`) drawn from the **test** split, rebuilt with the same sizes, seed and
+stratification the train stage used — so these are held-out rows, not training rows
+presented as if they were. `SK_ID_CURR` is carried alongside to label local explanations
+and is never a model input.
+
+| Output | What it answers |
+| --- | --- |
+| `reports/figures/shap_summary.png` | Beeswarm — direction and spread per feature |
+| `reports/figures/shap_bar.png` | Global ranking by mean \|SHAP\| |
+| `artifacts/explainability/global_feature_importance.csv` | The full ranking: `feature`, `mean_abs_shap`, `rank` |
+| `reports/figures/shap_local/shap_local_<SK_ID_CURR>.png` | One applicant's waterfall |
+| `artifacts/explainability/local_explanations.json` | Per applicant: probability, threshold, predicted and actual class, base value, top contributors with feature values |
+| `artifacts/explainability/explanation_report.json` | Provenance — model URI, version, source run, sample, explainer type, additivity check |
+
+**Local examples span the decision, not the top of the risk ranking.** Five near-identical
+high scores teach nothing, so the selection takes the extremes, the applicant nearest the
+frozen threshold, and — where labels allow — a true positive and a false negative, which
+are the two cases a credit reviewer actually asks about.
+
+Two details worth knowing when reading the numbers:
+
+**Explanations are in margin space.** Tree and linear explainers attribute to the model's
+raw log-odds score, not its probability, so `base_value + sum(shap) == raw_margin` holds
+while the same identity against `predict_proba` does not. The report records which space
+it verified and the measured error rather than failing a valid explanation for
+disagreeing with the wrong reference.
+
+**The positive class is located, never assumed.** SHAP returns a 2-D array, a list of
+per-class arrays, or a 3-D stack depending on estimator and library version. Each is
+normalised to class `1` using the estimator's own `classes_`; taking index 1 on faith
+would invert the sign of every contribution while still producing a well-formed report.
+
+The explainer is chosen from the champion's family — `TreeExplainer` for LightGBM,
+XGBoost, CatBoost and forests, `LinearExplainer` for linear models, and the general
+`shap.Explainer` otherwise — so a change of champion does not need a code change.
+
+Artifacts are also logged to a dedicated MLflow run tagged with `source_run_id`,
+`registered_model_name`, `model_alias` and `model_version`, rather than appended to the
+training run, so the historical model record is not disturbed.
+
 ### params.yaml
 
 `params.yaml` is the single source of truth for experiment configuration — split sizes, seed, IQR
@@ -382,7 +442,7 @@ modelium/
 │   │                             #   serialization, registry
 │   ├── inference/                # Predictor
 │   ├── tracking/                 # MLflow experiment tracking
-│   ├── explainability/           # SHAP scaffolding (not wired into the pipeline)
+│   ├── explainability/           # SHAP global + local explanations
 │   ├── monitoring/               # drift / fairness scaffolding (not wired in)
 │   ├── visualization/
 │   └── utils/                    # config loader, logger, exceptions
@@ -391,7 +451,8 @@ modelium/
 │   ├── prepare_data.py           # DVC stage 2
 │   ├── train.py                  # DVC stage 3
 │   ├── register_model.py         # DVC stage 4
-│   └── predict.py                # DVC stage 5
+│   ├── explain.py                # DVC stage 5
+│   └── predict.py                # DVC stage 6
 ├── tests/unit/
 ├── artifacts/                    # metrics, deployment metadata, run/registry records,
 │                                 #   predictions (gitignored)
@@ -415,16 +476,16 @@ modelium/
 - Batch inference with promotion safety
 - MLflow experiment tracking (local)
 - MLflow Model Registry with promotion-gated aliases (local)
+- SHAP explainability — global importance and per-applicant explanations
 
 **Not yet implemented**
 
 - Remote MLflow tracking server
-- SHAP explainability reporting
 - Model monitoring (drift, fairness)
 - FastAPI serving
 - Docker packaging
 - CI/CD
 - AWS deployment
 
-`src/explainability/` and `src/monitoring/` contain scaffolding from an earlier iteration and are
-not part of the pipeline.
+`src/monitoring/` contains scaffolding from an earlier iteration and is not part of the
+pipeline.

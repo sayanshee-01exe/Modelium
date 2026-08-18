@@ -17,7 +17,7 @@ VENV_BIN := $(CURDIR)/.venv/bin
 PY       := $(VENV_BIN)/python
 DVC_ENV  := PATH="$(VENV_BIN):$$PATH"
 
-.PHONY: help venv-check repro dag status train register register-force predict test compile mlflow-ui registry-show
+.PHONY: help venv-check repro dag status train register register-force explain predict test compile mlflow-ui registry-show
 
 help:
 	@echo "make venv-check    verify .venv exists and carries the training dependencies"
@@ -25,6 +25,7 @@ help:
 	@echo "make train         reproduce the train stage only"
 	@echo "make register      reproduce the register stage only"
 	@echo "make register-force  re-register an unchanged run (safe single-stage force)"
+	@echo "make explain       SHAP explanations for the registered champion"
 	@echo "make predict       reproduce the predict stage only"
 	@echo "make dag           show the stage graph"
 	@echo "make status        show what DVC considers out of date"
@@ -59,6 +60,9 @@ register: venv-check
 # -s/--single-item flag confines the force to this stage alone.
 register-force: venv-check
 	$(DVC_ENV) "$(VENV_BIN)/dvc" repro --single-item --force register
+
+explain: venv-check
+	$(DVC_ENV) "$(VENV_BIN)/dvc" repro explain
 
 predict: venv-check
 	$(DVC_ENV) "$(VENV_BIN)/dvc" repro predict

@@ -112,3 +112,26 @@ models:
     colsample_bytree: [0.6, 0.7, 0.8, 0.9]
     reg_alpha: [0.0, 0.1, 1.0, 5.0]
     reg_lambda: [0.5, 1.0, 5.0, 10.0]
+
+# SHAP explainability. Reads the registered champion and explains it — it never fits,
+# tunes or selects anything, so nothing here can change the model.
+#
+# The sizes are memory decisions, not accuracy ones. The holdout is ~46k rows x 537
+# transformed features and SHAP allocates a value per cell, so the full split would be
+# ~200 MB of float64 before any plotting. A 2,000-row sample estimates global importance
+# closely enough while staying comfortable on a laptop.
+explainability:
+  enabled: true
+  # Rows drawn from the reconstructed test split, deterministically by random_state.
+  sample_size: 2000
+  # Background rows for explainers that need a reference distribution (linear and the
+  # general fallback). TreeExplainer is exact and ignores this.
+  background_size: 200
+  # Fixed so a rerun explains exactly the same applicants.
+  random_state: 42
+  # Features shown in the global plots. The full ranking is always written to CSV.
+  max_display: 20
+  # Individual applicants explained, chosen to span the decision rather than to be the
+  # five riskiest — extremes, the threshold boundary, and a true positive / false
+  # negative where labels allow.
+  local_examples: 5

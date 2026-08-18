@@ -5,8 +5,8 @@ stages:
     deps:
     - path: config/config.py
       hash: md5
-      md5: fdc274fb45a4cf2a1c0877b8c00d548c
-      size: 2978
+      md5: 3dfe462d58aabd1eb998f7637262bef1
+      size: 3466
     - path: data/raw
       hash: md5
       md5: d162fbc344236fe82a668e9ae8b93eb0.dir
@@ -27,19 +27,19 @@ stages:
     outs:
     - path: artifacts/metrics/raw_data_validation.json
       hash: md5
-      md5: c7ff2b264f9d16340a3bdd23d83b27cd
+      md5: ad8445f91c473792ca8eeb4203d805dd
       size: 705
   prepare:
     cmd: python scripts/prepare_data.py
     deps:
     - path: artifacts/metrics/raw_data_validation.json
       hash: md5
-      md5: c7ff2b264f9d16340a3bdd23d83b27cd
+      md5: ad8445f91c473792ca8eeb4203d805dd
       size: 705
     - path: config/config.py
       hash: md5
-      md5: fdc274fb45a4cf2a1c0877b8c00d548c
-      size: 2978
+      md5: 3dfe462d58aabd1eb998f7637262bef1
+      size: 3466
     - path: data/raw
       hash: md5
       md5: d162fbc344236fe82a668e9ae8b93eb0.dir
@@ -72,7 +72,7 @@ stages:
     outs:
     - path: data/processed/prepare_report.json
       hash: md5
-      md5: 2e25ca2248b14440a769a0b8bf514553
+      md5: 3612f8e266edb70977e90a6a337921b1
       size: 1038
     - path: data/processed/test_features.parquet
       hash: md5
@@ -396,3 +396,88 @@ stages:
       hash: md5
       md5: a96c0c854e6282f4a208d6434794849f
       size: 885
+  explain:
+    cmd: python scripts/explain.py
+    deps:
+    - path: artifacts/deployment_meta.json
+      hash: md5
+      md5: 9e7d029717b7cfef9bfd048aa503bb25
+      size: 48553
+    - path: artifacts/registry_record.json
+      hash: md5
+      md5: a96c0c854e6282f4a208d6434794849f
+      size: 885
+    - path: config/config.py
+      hash: md5
+      md5: fdc274fb45a4cf2a1c0877b8c00d548c
+      size: 2978
+    - path: data/processed/train_features.parquet
+      hash: md5
+      md5: 8fac3f9128d1fe638ce5f412be5d31d2
+      size: 160407154
+    - path: scripts/explain.py
+      hash: md5
+      md5: 972a9f0c84f0d8661ea00cdae8724cf7
+      size: 12361
+    - path: src/data/data_preparation.py
+      hash: md5
+      md5: 39f461d1ca860f709b0b53a9ae2bd387
+      size: 6141
+    - path: src/explainability/shap_explainer.py
+      hash: md5
+      md5: 1eae2a996902a29a36fd8d9a7725a0fc
+      size: 31875
+    - path: src/features/data_preprocessing.py
+      hash: md5
+      md5: 5104d07cee7aa9e546bc81ba87465b87
+      size: 8477
+    - path: src/utils/config_loader.py
+      hash: md5
+      md5: a927a49fa38b0d2ada84f50e511f4ef1
+      size: 13604
+    params:
+      params.yaml:
+        data:
+          validation_size: 0.15
+          test_size: 0.15
+          random_state: 42
+        explainability:
+          enabled: true
+          sample_size: 2000
+          background_size: 200
+          random_state: 42
+          max_display: 20
+          local_examples: 5
+        mlflow:
+          enabled: true
+          experiment_name: modelium-credit-risk
+          tracking_uri: sqlite:///mlflow.db
+          registered_model_name: modelium-credit-risk-champion
+          champion_alias: champion
+          candidate_alias: candidate
+    outs:
+    - path: artifacts/explainability/explanation_report.json
+      hash: md5
+      md5: 914a11e16e18c2c9790d548d6dc3a784
+      size: 4359
+    - path: artifacts/explainability/global_feature_importance.csv
+      hash: md5
+      md5: d0adc6267b2bbc173b6372ea969765db
+      size: 22282
+    - path: artifacts/explainability/local_explanations.json
+      hash: md5
+      md5: e79bbec906b4a0642cbb602fef2596da
+      size: 16505
+    - path: reports/figures/shap_bar.png
+      hash: md5
+      md5: 621baf84fd2a6cf6aa8361dab1dadf83
+      size: 81624
+    - path: reports/figures/shap_local
+      hash: md5
+      md5: ad4aa286cdd216acce0a5a1d99bf4e5b.dir
+      size: 759540
+      nfiles: 5
+    - path: reports/figures/shap_summary.png
+      hash: md5
+      md5: 3a9cc133074b4d0a5c4ebd7689573259
+      size: 177576

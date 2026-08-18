@@ -187,3 +187,26 @@ monitoring:
     minimum_group_size: 100
     max_demographic_parity_difference: 0.10
     max_equal_opportunity_difference: 0.10
+
+# Local FastAPI serving. The API reads the registry, never a local filename, so the
+# model it serves is whatever currently holds the champion alias.
+#
+# Host and port are defaults for local runs; deployment should override them through the
+# environment (MODELIUM_API_HOST, MODELIUM_API_PORT, ...) rather than by editing this
+# file. No secret belongs here.
+api:
+  host: 127.0.0.1
+  port: 8000
+  # Bounded so one request cannot ask the service to score an unbounded payload.
+  max_batch_size: 100
+  model_uri: models:/modelium-credit-risk-champion@champion
+  # Precomputed engineered features, looked up by SK_ID_CURR. The API deliberately does
+  # NOT rebuild relational aggregation per request: that is a multi-table join over ~57M
+  # child rows, and a second implementation of it is how training/serving skew starts.
+  feature_store_path: data/processed/test_features.parquet
+  # Applicants explained per /explain call. SHAP on one row is fast; this is the cap
+  # that keeps it that way.
+  max_explain_rows: 1
+  # Contributors returned per direction in an explanation.
+  explain_top_n: 10
+  log_level: INFO

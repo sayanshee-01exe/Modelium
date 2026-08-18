@@ -44,3 +44,10 @@ pip-audit>=2.7
 #   diskcache 5.6.3    PYSEC-2026-2447 — pickle deserialization via the cache dir. 5.6.3 is
 #     the newest release; no upstream fix exists. Requires write access to the local DVC
 #     cache, which already implies local code execution.
+
+# --- API serving (Step 10) -----------------------------------------------------------
+# Local FastAPI service for the registered champion. uvicorn is the ASGI server;
+# httpx backs fastapi.testclient.TestClient, so it is a test dependency in practice.
+fastapi>=0.115
+uvicorn>=0.30
+httpx>=0.27

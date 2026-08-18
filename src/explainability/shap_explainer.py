@@ -503,9 +503,20 @@ def check_additivity(values: np.ndarray, base_value: float, reference) -> dict[s
 def compute_shap_values(
     estimator, transformed: np.ndarray, feature_names: Sequence[str],
     *, positive_index: int, background: np.ndarray | None = None,
+    explainer=None, explainer_kind: str | None = None,
 ) -> ShapResult:
-    """Explain the fitted estimator on an already-transformed matrix."""
-    explainer, kind = select_explainer(estimator, background)
+    """Explain the fitted estimator on an already-transformed matrix.
+
+    Args:
+        explainer: An already-constructed SHAP explainer to reuse. The serving layer
+            builds one at startup and passes it here so a per-request explanation does
+            not rebuild it; batch callers leave it None and one is selected for them.
+        explainer_kind: Label for a supplied explainer, recorded in the result.
+    """
+    if explainer is None:
+        explainer, kind = select_explainer(estimator, background)
+    else:
+        kind = explainer_kind or type(explainer).__name__
     logger.info("Computing SHAP values for %d rows x %d features...",
                 transformed.shape[0], transformed.shape[1])
 

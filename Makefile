@@ -14,10 +14,14 @@
 # two arguments and reports the environment as broken.
 
 VENV_BIN := $(CURDIR)/.venv/bin
+# Overridable from the environment for a deployment that binds elsewhere:
+#   make api API_HOST=0.0.0.0 API_PORT=8080
+API_HOST ?= 127.0.0.1
+API_PORT ?= 8000
 PY       := $(VENV_BIN)/python
 DVC_ENV  := PATH="$(VENV_BIN):$$PATH"
 
-.PHONY: help venv-check repro dag status train register register-force explain monitor monitoring-batch monitoring-show predict test compile mlflow-ui registry-show
+.PHONY: help venv-check repro dag status train register register-force explain monitor monitoring-batch monitoring-show predict api api-test test compile mlflow-ui registry-show
 
 help:
 	@echo "make venv-check    verify .venv exists and carries the training dependencies"
@@ -32,6 +36,8 @@ help:
 	@echo "make predict       reproduce the predict stage only"
 	@echo "make dag           show the stage graph"
 	@echo "make status        show what DVC considers out of date"
+	@echo "make api           serve the champion at $(API_HOST):$(API_PORT)"
+	@echo "make api-test      run the API test suite"
 	@echo "make test          run the unit suite"
 	@echo "make compile       byte-compile src/ and scripts/"
 	@echo "make mlflow-ui     browse runs and the model registry at 127.0.0.1:5000"
@@ -90,8 +96,16 @@ status:
 test:
 	"$(PY)" -m pytest tests/unit -q
 
+# Local serving of the registered champion. Not a DVC stage: the API is a long-running
+# service, not a reproducible batch step, so it has no place in the pipeline graph.
+api: venv-check
+	"$(VENV_BIN)/uvicorn" api.main:app --host $(API_HOST) --port $(API_PORT)
+
+api-test:
+	"$(PY)" -m pytest tests/api -q
+
 compile:
-	"$(PY)" -m compileall -q src scripts
+	"$(PY)" -m compileall -q src scripts api
 
 # Local SQLite backend, matching mlflow.tracking_uri in params.yaml. No remote server.
 mlflow-ui:

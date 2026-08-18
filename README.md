@@ -489,6 +489,97 @@ Each run is also logged to a dedicated MLflow run tagged `monitoring_run=true` a
 to the champion by `source_training_run_id`, `model_version` and `model_alias`. The
 training run's own metrics are never modified.
 
+## API serving
+
+A local FastAPI service that scores applicants with the **registered champion**.
+
+```bash
+make api                    # or: uvicorn api.main:app --host 127.0.0.1 --port 8000
+make api-test
+```
+
+Interactive schema at <http://127.0.0.1:8000/docs>, ReDoc at `/redoc`, raw spec at
+`/openapi.json`.
+
+The model is resolved through the registry alias
+`models:/modelium-credit-risk-champion@champion`, never from a local filename, so the
+service answers with whatever version the pipeline actually promoted. It is loaded **once**
+at startup — resolving an alias and unpickling a fitted pipeline takes seconds, and doing
+that per request would make latency dominated by loading.
+
+Scoring reuses `src/inference/predictor.py` rather than reimplementing it, so the API
+inherits the same preprocessing, schema alignment, positive-class resolution, promotion
+gate and **frozen decision threshold** that batch inference uses. A second implementation
+of any of those is how training/serving skew starts.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Liveness. Answers even when the model failed to load |
+| `GET /ready` | Readiness — five named checks; 200 ready, 503 not |
+| `GET /model/info` | Which version is answering, its threshold and metrics |
+| `POST /predict` | Score one applicant |
+| `POST /predict/batch` | Score a bounded list |
+| `POST /explain` | Per-applicant SHAP contributions |
+
+**Applicants are identified, not described.** The champion expects 407 engineered
+features built by a relational aggregation over ~57 M child rows. Requiring a caller to
+supply those by hand would be unusable, and rebuilding them per request would duplicate
+the training feature pipeline. So the default contract is an id, resolved against the
+precomputed feature store; a caller holding an engineered row may pass `features`
+instead.
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"sk_id_curr": 100005}'
+```
+
+```json
+{
+  "sk_id_curr": 100005,
+  "default_probability": 0.6025,
+  "predicted_class": 0,
+  "threshold": 0.6916,
+  "model_version": "2",
+  "request_id": "3f2a…"
+}
+```
+
+That response shows why the frozen threshold matters: at 0.6025 this applicant is **not**
+flagged, because the threshold tuned on validation is 0.6916. Under sklearn's default 0.5
+the same score would have been a default prediction.
+
+**Safety behaviours worth knowing:**
+
+- An **unpromoted** model is refused, not served. `Predictor` performs that check, and
+  the API never passes `allow_unpromoted`.
+- If the registry pipeline and the on-disk metadata describe **different champions**, the
+  service refuses to start serving — a model with another run's threshold and schema is
+  silently wrong in the worst way.
+- A failed load is a served **503**, not a crashed process: `/ready` names which of the
+  five checks failed, which tells an operator more than a container that exits.
+- Batch size is capped by `api.max_batch_size`, and duplicate identifiers are rejected
+  because they make a response ambiguous to join back.
+- Errors are structured with a stable `category`; **no stack trace ever reaches a
+  client**, and the log carries no applicant records or feature vectors.
+- Every response carries `X-Request-ID` (a supplied one is preserved) and
+  `X-Response-Time-ms`.
+
+`/explain` returns per-applicant SHAP contributions using the same
+`src/explainability/shap_explainer.py` the pipeline uses, with the explainer built once
+at startup. Contributions are in **margin (log-odds) space** — they sum to the raw score,
+not to the probability. Global SHAP artifacts come from the `explain` pipeline stage, not
+from a request.
+
+### Limitations
+
+This is **local serving**. There is **no authentication**, no rate limiting and no
+transport security in this layer, so it is not safe to expose publicly as it stands. CORS
+middleware is deliberately absent, so no browser origin is permitted by default. The API
+is **not** a DVC stage — it is a long-running service, not a reproducible batch step, so
+it has no place in the pipeline graph. Docker packaging, CI/CD and cloud deployment are
+future steps and are not implemented.
+
 ### params.yaml
 
 `params.yaml` is the single source of truth for experiment configuration — split sizes, seed, IQR
@@ -561,12 +652,12 @@ modelium/
 - MLflow Model Registry with promotion-gated aliases (local)
 - SHAP explainability — global importance and per-applicant explanations
 - Offline batch monitoring — data drift, prediction drift, performance, fairness
+- FastAPI serving of the registered champion (local)
 
 **Not yet implemented**
 
 - Remote MLflow tracking server
-- Model monitoring (drift, fairness)
-- FastAPI serving
+- API authentication
 - Docker packaging
 - CI/CD
 - AWS deployment
